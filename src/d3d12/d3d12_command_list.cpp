@@ -272,6 +272,12 @@ public:
 
   DrawCallStatus
   PreDraw() {
+    /* No pipeline bound (never set, or SetPipelineState(NULL)): D3D12
+     * leaves the draw undefined; drop it rather than encode a draw with
+     * no render pipeline state, which segfaults inside the Metal
+     * driver. */
+    if (!pso_graphics_)
+      return DrawCallStatus::Invalid;
     if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Render) {
 
       allocator_->InvalidateCurrentPass();

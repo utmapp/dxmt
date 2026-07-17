@@ -209,6 +209,14 @@ struct RenderEncoderData : EncoderData {
   bool use_emulated_so = 0;
   TileBarrierPSOKey tile_barrier_pso_key = {};
   WMT::RenderPipelineState last_pso = {};
+  /* Set when a pipeline finalize yielded no PipelineState (Metal
+   * rejected the PSO); draw commands are diverted to scratch until a
+   * later finalize binds a valid pipeline and clears this.  Internal
+   * SetPSO emissions (e.g. the intrapass tile barrier) must NOT clear
+   * it: they bind their own PSO and recover last_pso, which is nil or
+   * stale while the app pipeline is invalid.  Encoding a draw with no
+   * pipeline bound segfaults inside the Metal driver. */
+  bool pipeline_invalid = 0;
 };
 
 struct ComputeEncoderData : EncoderData {
@@ -595,10 +603,37 @@ public:
   }
 
   template <typename cmd_struct>
+  static constexpr bool is_render_draw_command =
+      std::disjunction_v<
+          std::is_same<cmd_struct, wmtcmd_render_draw>,
+          std::is_same<cmd_struct, wmtcmd_render_draw_indexed>,
+          std::is_same<cmd_struct, wmtcmd_render_draw_indirect>,
+          std::is_same<cmd_struct, wmtcmd_render_draw_indexed_indirect>,
+          std::is_same<cmd_struct, wmtcmd_render_draw_meshthreadgroups>,
+          std::is_same<cmd_struct, wmtcmd_render_draw_meshthreadgroups_indirect>,
+          std::is_same<cmd_struct, wmtcmd_render_dxmt_geometry_draw>,
+          std::is_same<cmd_struct, wmtcmd_render_dxmt_geometry_draw_indexed>,
+          std::is_same<cmd_struct, wmtcmd_render_dxmt_geometry_draw_indirect>,
+          std::is_same<cmd_struct, wmtcmd_render_dxmt_geometry_draw_indexed_indirect>,
+          std::is_same<cmd_struct, wmtcmd_render_dxmt_tessellation_mesh_draw>,
+          std::is_same<cmd_struct, wmtcmd_render_dxmt_tessellation_mesh_draw_indexed>,
+          std::is_same<cmd_struct, wmtcmd_render_dxmt_tessellation_mesh_draw_indirect>,
+          std::is_same<cmd_struct, wmtcmd_render_dxmt_tessellation_mesh_draw_indexed_indirect>>;
+
+  template <typename cmd_struct>
   cmd_struct &
   encodeRenderCommand() {
     assert(encoder_current->type == EncoderType::Render);
     auto encoder = static_cast<RenderEncoderData *>(encoder_current);
+    if constexpr (is_render_draw_command<cmd_struct>) {
+      if (encoder->pipeline_invalid) {
+        /* Divert to scratch: allocated but never linked into the
+         * command list, so the caller can fill it in harmlessly. */
+        auto scratch = (cmd_struct *)allocate_cpu_heap(sizeof(cmd_struct), 16);
+        scratch->next.set(nullptr);
+        return *scratch;
+      }
+    }
     auto storage = (cmd_struct *)allocate_cpu_heap(sizeof(cmd_struct), 16);
     encoder->cmd_tail->next.set(storage);
     encoder->cmd_tail = (wmtcmd_base *)storage;

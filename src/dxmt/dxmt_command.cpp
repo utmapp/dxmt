@@ -317,6 +317,10 @@ DepthStencilBlitContext::copyFromBuffer(
     const Rc<Buffer> &src, uint64_t src_offset, uint64_t src_length, uint32_t bytes_per_row, uint32_t bytes_per_image,
     const Rc<Texture> &depth_stencil, uint32_t level, uint32_t slice, bool from_d24s8
 ) {
+  /* PSO creation failed at startup; drop the blit (like the clear
+   * path) instead of encoding a draw with no pipeline state. */
+  if (!(from_d24s8 ? pso_copy_d24s8_ : pso_copy_d32s8_))
+    return;
 
   TextureViewDescriptor view_desc;
   switch (depth_stencil->textureType()) {

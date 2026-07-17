@@ -172,13 +172,16 @@ Presenter::encodeCommands(
   double height = layer_props_.drawable_height;
 
   encoder.setFragmentBytes(&metadata, sizeof(metadata), 0);
-  if (backbuffer.width() == (uint64_t)width && backbuffer.height() == (uint64_t)height) {
-    encoder.setRenderPipelineState(present_blit_);
-  } else {
-    encoder.setRenderPipelineState(present_scale_);
+  auto &present_pso = backbuffer.width() == (uint64_t)width && backbuffer.height() == (uint64_t)height
+                          ? present_blit_
+                          : present_scale_;
+  /* PSO creation failed at startup; skip the quad (black frame) instead
+   * of encoding a draw with no pipeline state. */
+  if (present_pso != nullptr) {
+    encoder.setRenderPipelineState(present_pso);
+    encoder.setViewport({0, 0, width, height, 0, 1});
+    encoder.drawPrimitives(WMTPrimitiveTypeTriangle, 0, 3);
   }
-  encoder.setViewport({0, 0, width, height, 0, 1});
-  encoder.drawPrimitives(WMTPrimitiveTypeTriangle, 0, 3);
   update_fences(encoder);
   encoder.endEncoding();
 

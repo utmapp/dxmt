@@ -966,6 +966,8 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     }
     case WMTRenderCommandSetPSO: {
       struct wmtcmd_render_setpso *body = (struct wmtcmd_render_setpso *)next;
+      if (!body->pso)
+        break; /* never bind a nil pipeline state */
       [encoder setRenderPipelineState:(id<MTLRenderPipelineState>)body->pso];
       break;
     }

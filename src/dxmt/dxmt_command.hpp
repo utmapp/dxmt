@@ -156,6 +156,8 @@ public:
 
   void
   MarshalGSDispatchArguments(WMT::RenderCommandEncoder encoder, WMT::Buffer commands, uint32_t commands_offset) {
+    if (!gs_draw_arguments_marshal)
+      return; /* PSO creation failed at startup; never draw without one */
     encoder.setRenderPipelineState(gs_draw_arguments_marshal);
     encoder.setVertexBuffer(commands, commands_offset, kCustomBufferArgumentIndex0);
     encoder.drawPrimitives(WMTPrimitiveTypePoint, 0, 1);
@@ -164,6 +166,8 @@ public:
 
   void
   MarshalTSDispatchArguments(WMT::RenderCommandEncoder encoder, WMT::Buffer commands, uint32_t commands_offset) {
+    if (!ts_draw_arguments_marshal)
+      return; /* PSO creation failed at startup; never draw without one */
     encoder.setRenderPipelineState(ts_draw_arguments_marshal);
     encoder.setVertexBuffer(commands, commands_offset, kCustomBufferArgumentIndex0);
     encoder.drawPrimitives(WMTPrimitiveTypePoint, 0, 1);
