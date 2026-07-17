@@ -601,24 +601,43 @@ void handle_signature_ps(
       pso_valid_output_reg_mask |= (1 << reg);
       if (sig.mask() == 0) break;
       auto type = sig.componentType();
+      if (type == RegisterComponentType::Uint)
+        sm50_shader->ps_output_declared_uint_mask |= (1 << reg);
+      else if (type == RegisterComponentType::Int)
+        sm50_shader->ps_output_declared_sint_mask |= (1 << reg);
       signature_handlers.push_back([=](SignatureContext &ctx) {
         uint32_t assigned_index;
+        /* The bound RTV can carry an integer format while the shader
+         * declares a float output (undefined in D3D11, tolerated by
+         * real hardware as a bit-reinterpretation).  Metal rejects the
+         * mismatch at pipeline-state creation, so redeclare the output
+         * with the attachment's component type; pop_output_reg reads
+         * the typeless register file and bitcasts to the declared
+         * type, matching the hardware behavior. */
+        auto declared_type = type;
+        if (type == RegisterComponentType::Float) {
+          if (ctx.uint_output_reg_mask & (1 << reg))
+            declared_type = RegisterComponentType::Uint;
+          else if (ctx.sint_output_reg_mask & (1 << reg))
+            declared_type = RegisterComponentType::Int;
+        }
         if (ctx.dual_source_blending) {
           if (reg > 1 || reg < 0)
             return;
           assigned_index = ctx.func_signature.DefineOutput(OutputRenderTarget{
             .dual_source_blending = true,
             .index = reg,
-            .type = to_msl_type(type),
+            .type = to_msl_type(declared_type),
           });
         } else {
           assigned_index = ctx.func_signature.DefineOutput(OutputRenderTarget{
             .dual_source_blending = false,
             .index = reg,
-            .type = to_msl_type(type),
+            .type = to_msl_type(declared_type),
           });
         }
-        if (type == RegisterComponentType::Float && ctx.unorm_output_reg_mask & (1 << reg))
+        if (declared_type == RegisterComponentType::Float &&
+            ctx.unorm_output_reg_mask & (1 << reg))
           ctx.epilogue >> pop_output_reg_fix_unorm(reg, mask, assigned_index);
         else
           ctx.epilogue >> pop_output_reg(reg, mask, assigned_index);

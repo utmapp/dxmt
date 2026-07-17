@@ -36,6 +36,52 @@ Is_sRGBVariant(WMTPixelFormat format) {
 
 bool IsBlockCompressionFormat(WMTPixelFormat format);
 
+/* Metal statically type-checks shader outputs against attachment
+ * formats, so pipelines that mix float outputs with integer
+ * attachments (undefined but legal in D3D11) need the output register
+ * redeclared with the attachment's component type. */
+inline bool
+IsUintColorFormat(WMTPixelFormat format) {
+  switch (format) {
+  case WMTPixelFormatR8Uint:
+  case WMTPixelFormatR16Uint:
+  case WMTPixelFormatRG8Uint:
+  case WMTPixelFormatR32Uint:
+  case WMTPixelFormatRG16Uint:
+  case WMTPixelFormatRGBA8Uint:
+  case WMTPixelFormatRGB10A2Uint:
+  case WMTPixelFormatRG32Uint:
+  case WMTPixelFormatRGBA16Uint:
+  case WMTPixelFormatRGBA32Uint:
+    return true;
+  default:
+    return false;
+  }
+}
+
+inline bool
+IsSintColorFormat(WMTPixelFormat format) {
+  switch (format) {
+  case WMTPixelFormatR8Sint:
+  case WMTPixelFormatR16Sint:
+  case WMTPixelFormatRG8Sint:
+  case WMTPixelFormatR32Sint:
+  case WMTPixelFormatRG16Sint:
+  case WMTPixelFormatRGBA8Sint:
+  case WMTPixelFormatRG32Sint:
+  case WMTPixelFormatRGBA16Sint:
+  case WMTPixelFormatRGBA32Sint:
+    return true;
+  default:
+    return false;
+  }
+}
+
+inline bool
+IsIntegerColorFormat(WMTPixelFormat format) {
+  return IsUintColorFormat(format) || IsSintColorFormat(format);
+}
+
 uint32_t DepthStencilPlanarFlags(WMTPixelFormat format);
 
 enum MTL_DXGI_FORMAT_FLAG {

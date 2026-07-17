@@ -203,6 +203,11 @@ public:
         ))) {
       return E_FAIL;
     }
+    if (IsIntegerColorFormat(descriptor.format))
+      WARN("integer-format RTV: view_dxgi=", (uint32_t)finalDesc.Format,
+           " res_dxgi=", (uint32_t)this->desc.Format,
+           " desc_provided=", pDesc ? 1 : 0,
+           " wmt=", (uint32_t)descriptor.format);
     if (!ppView) {
       return S_FALSE;
     }

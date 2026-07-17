@@ -330,13 +330,15 @@ struct SignatureContext {
   bool skip_vertex_output;
   uint32_t pull_mode_reg_mask;
   uint32_t unorm_output_reg_mask;
+  uint32_t uint_output_reg_mask;
+  uint32_t sint_output_reg_mask;
 
   SignatureContext(
     IREffect &prologue, IRValue &epilogue, air::FunctionSignatureBuilder &func_signature, io_binding_map &resource
   )
       : prologue(prologue), epilogue(epilogue), func_signature(func_signature), resource(resource), ia_layout(nullptr),
         dual_source_blending(false), disable_depth_output(false), skip_vertex_output(false), pull_mode_reg_mask(0),
-        unorm_output_reg_mask(0){};
+        unorm_output_reg_mask(0), uint_output_reg_mask(0), sint_output_reg_mask(0){};
 };
 
 struct MeshOutputContext {
@@ -413,6 +415,9 @@ public:
   uint32_t max_input_register = 0;
   uint32_t max_output_register = 0;
   uint32_t pso_valid_output_reg_mask = 0;
+  /* PS output registers declared uint/sint in the DXBC signature */
+  uint32_t ps_output_declared_uint_mask = 0;
+  uint32_t ps_output_declared_sint_mask = 0;
   uint32_t max_patch_constant_output_register = 0;
   std::vector<MTL_SM50_SHADER_ARGUMENT> args_reflection_cbuffer;
   std::vector<MTL_SM50_SHADER_ARGUMENT> args_reflection;

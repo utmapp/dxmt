@@ -138,37 +138,40 @@ template <> struct equal_to<MTL_GRAPHICS_PIPELINE_DESC> {
 };
 } // namespace std
 
+#include "dxmt_format.hpp"
+
 namespace dxmt {
 
-/* True for pure integer (Uint/Sint) color formats.  Used to drop color
- * writes when Metal rejects a pipeline over a shader-output/attachment
- * component-type mismatch, which D3D11 leaves undefined. */
+/* D3D11 leaves color writes undefined when the shader output and RTV
+ * component types mismatch; Metal instead fails pipeline creation.
+ * Drop only writes a mismatch can actually reach: float-declared
+ * outputs are already redeclared to the attachment's integer type, so
+ * only an output declared with the opposite integer type can still
+ * mismatch, and blending on an integer attachment is invalid
+ * regardless of types.  drop_all is the last-resort fallback when the
+ * failure wasn't attributable: drop every integer-attachment write.
+ * Returns whether anything changed (i.e. a retry is worthwhile). */
+template <typename PipelineInfo>
 inline bool
-IsIntegerColorFormat(WMTPixelFormat format) {
-  switch (format) {
-  case WMTPixelFormatR8Uint:
-  case WMTPixelFormatR8Sint:
-  case WMTPixelFormatR16Uint:
-  case WMTPixelFormatR16Sint:
-  case WMTPixelFormatRG8Uint:
-  case WMTPixelFormatRG8Sint:
-  case WMTPixelFormatR32Uint:
-  case WMTPixelFormatR32Sint:
-  case WMTPixelFormatRG16Uint:
-  case WMTPixelFormatRG16Sint:
-  case WMTPixelFormatRGBA8Uint:
-  case WMTPixelFormatRGBA8Sint:
-  case WMTPixelFormatRGB10A2Uint:
-  case WMTPixelFormatRG32Uint:
-  case WMTPixelFormatRG32Sint:
-  case WMTPixelFormatRGBA16Uint:
-  case WMTPixelFormatRGBA16Sint:
-  case WMTPixelFormatRGBA32Uint:
-  case WMTPixelFormatRGBA32Sint:
-    return true;
-  default:
-    return false;
+DropIntegerColorWrites(
+    PipelineInfo &info, unsigned num_rtvs, uint32_t ps_uint_outputs, uint32_t ps_sint_outputs, bool drop_all) {
+  bool changed = false;
+  for (unsigned i = 0; i < num_rtvs; i++) {
+    auto format = info.colors[i].pixel_format;
+    if (!IsIntegerColorFormat(format))
+      continue;
+    if (info.colors[i].write_mask == 0 && !info.colors[i].blending_enabled)
+      continue;
+    bool mismatch = drop_all || (IsUintColorFormat(format) && (ps_sint_outputs & (1u << i))) ||
+                    (IsSintColorFormat(format) && (ps_uint_outputs & (1u << i)));
+    if (!mismatch && !info.colors[i].blending_enabled)
+      continue;
+    if (mismatch)
+      info.colors[i].write_mask = 0;
+    info.colors[i].blending_enabled = false;
+    changed = true;
   }
+  return changed;
 }
 
 class MTLCompiledGraphicsPipeline : public ThreadpoolWork {

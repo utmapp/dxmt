@@ -415,6 +415,8 @@ public:
       data_ps.dual_source_blending = dual_source_blending;
       data_ps.disable_depth_output = false;
       data_ps.unorm_output_reg_mask = 0;
+      data_ps.uint_output_reg_mask = 0;
+      data_ps.sint_output_reg_mask = 0;
       data_ps.sample_mask = pDesc->SampleMask;
       data_ps.type = SM50_SHADER_PSO_PIXEL_SHADER;
       data_ps.next = &common;

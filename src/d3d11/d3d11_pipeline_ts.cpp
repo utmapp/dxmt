@@ -40,11 +40,17 @@ public:
     if (pDesc->RasterizationEnabled && !pDesc->PixelShader)
       num_rtvs = 0;
     uint32_t unorm_output_reg_mask = 0;
+    uint32_t uint_output_reg_mask = 0;
+    uint32_t sint_output_reg_mask = 0;
     for (unsigned i = 0; i < num_rtvs; i++) {
       rtv_formats[i] = pDesc->ColorAttachmentFormats[i];
       unorm_output_reg_mask |= (uint32_t(IsUnorm8RenderTargetFormat(
                                     pDesc->ColorAttachmentFormats[i]))
                                 << i);
+      uint_output_reg_mask |=
+          (uint32_t(IsUintColorFormat(pDesc->ColorAttachmentFormats[i])) << i);
+      sint_output_reg_mask |=
+          (uint32_t(IsSintColorFormat(pDesc->ColorAttachmentFormats[i])) << i);
     }
 
     hull_reflection = pDesc->HullShader->reflection();
@@ -74,11 +80,16 @@ public:
       PixelShader = pDesc->PixelShader->get_shader(ShaderVariantPixel{
           pDesc->SampleMask, pDesc->BlendState->IsDualSourceBlending(),
           depth_stencil_format == WMTPixelFormatInvalid,
-          unorm_output_reg_mask});
+          unorm_output_reg_mask, uint_output_reg_mask,
+          sint_output_reg_mask});
       ps_valid_render_targets = pDesc->PixelShader->reflection().PSValidRenderTargets;
+      ps_uint_output_registers = pDesc->PixelShader->reflection().PSUintOutputRegisterMask;
+      ps_sint_output_registers = pDesc->PixelShader->reflection().PSSintOutputRegisterMask;
     } else {
       PixelShader = nullptr;
       ps_valid_render_targets = 0;
+      ps_uint_output_registers = 0;
+      ps_sint_output_registers = 0;
     }
   }
 
@@ -172,29 +183,33 @@ public:
       ERR("Failed to create tessellation raster PSO: ",
           err.description().getUTF8String());
       /* Same undefined-behavior escape hatch as the ordinary graphics
-       * PSO path: drop color writes to integer attachments the shader
-       * output type can't match and retry. */
-      bool retry = false;
-      for (unsigned i = 0; i < num_rtvs; i++) {
-        if (!IsIntegerColorFormat(info.colors[i].pixel_format))
-          continue;
-        if (info.colors[i].write_mask == 0 && !info.colors[i].blending_enabled)
-          continue;
-        info.colors[i].write_mask = 0;
-        info.colors[i].blending_enabled = false;
-        retry = true;
+       * PSO path: drop color writes a component-type mismatch can
+       * reach and retry; if the failure isn't attributable to a
+       * mismatch, fall back to dropping every integer-attachment
+       * write. */
+      bool retried = false;
+      if (DropIntegerColorWrites(info, num_rtvs, ps_uint_output_registers, ps_sint_output_registers, false)) {
+        retried = true;
+        std::lock_guard<dxmt::mutex> lock(ts_global_mutex);
+        state_rasterization_ =
+            device_->GetMTLDevice().newRenderPipelineState(info, err);
+        if (state_rasterization_ != nullptr)
+          WARN("Created tessellation raster PSO with mismatched integer "
+               "color attachment write(s) dropped");
       }
-      if (retry) {
+      if (state_rasterization_ == nullptr &&
+          DropIntegerColorWrites(info, num_rtvs, 0, 0, true)) {
+        retried = true;
         std::lock_guard<dxmt::mutex> lock(ts_global_mutex);
         state_rasterization_ =
             device_->GetMTLDevice().newRenderPipelineState(info, err);
         if (state_rasterization_ != nullptr)
           WARN("Created tessellation raster PSO with writes to integer "
                "color attachment(s) dropped");
-        else
-          ERR("Tessellation PSO retry without integer color writes also "
-              "failed: ", err.description().getUTF8String());
       }
+      if (state_rasterization_ == nullptr && retried)
+        ERR("Tessellation PSO retry without integer color writes also "
+            "failed: ", err.description().getUTF8String());
     }
 
     return this;
@@ -210,6 +225,8 @@ public:
 private:
   UINT num_rtvs;
   UINT ps_valid_render_targets;
+  UINT ps_uint_output_registers;
+  UINT ps_sint_output_registers;
   WMTPixelFormat rtv_formats[8];
   WMTPixelFormat depth_stencil_format;
   MTLD3D11Device *device_;

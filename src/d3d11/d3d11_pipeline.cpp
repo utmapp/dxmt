@@ -20,9 +20,13 @@ public:
         RasterizationEnabled(pDesc->RasterizationEnabled),
         SampleCount(pDesc->SampleCount) {
     uint32_t unorm_output_reg_mask = 0;
+    uint32_t uint_output_reg_mask = 0;
+    uint32_t sint_output_reg_mask = 0;
     for (unsigned i = 0; i < num_rtvs; i++) {
       rtv_formats[i] = pDesc->ColorAttachmentFormats[i];
       unorm_output_reg_mask |= (uint32_t(IsUnorm8RenderTargetFormat(pDesc->ColorAttachmentFormats[i])) << i);
+      uint_output_reg_mask |= (uint32_t(IsUintColorFormat(pDesc->ColorAttachmentFormats[i])) << i);
+      sint_output_reg_mask |= (uint32_t(IsSintColorFormat(pDesc->ColorAttachmentFormats[i])) << i);
     }
 
     if (pDesc->SOLayout) {
@@ -38,11 +42,16 @@ public:
       PixelShader = pDesc->PixelShader->get_shader(ShaderVariantPixel{
           pDesc->SampleMask, pDesc->BlendState->IsDualSourceBlending(),
           depth_stencil_format == WMTPixelFormatInvalid,
-          unorm_output_reg_mask});
+          unorm_output_reg_mask, uint_output_reg_mask,
+          sint_output_reg_mask});
       ps_valid_render_targets = pDesc->PixelShader->reflection().PSValidRenderTargets;
+      ps_uint_output_registers = pDesc->PixelShader->reflection().PSUintOutputRegisterMask;
+      ps_sint_output_registers = pDesc->PixelShader->reflection().PSSintOutputRegisterMask;
     } else {
       PixelShader = nullptr;
       ps_valid_render_targets = 0;
+      ps_uint_output_registers = 0;
+      ps_sint_output_registers = 0;
     }
   }
 
@@ -100,31 +109,35 @@ public:
 
     if (state_ == nullptr) {
       ERR("Failed to create PSO: ", err.description().getUTF8String());
-      /* D3D11 leaves color writes undefined when the shader output and
-       * RTV component types mismatch; Metal instead fails the whole
-       * pipeline (seen with a float4-output PS on a Uint attachment).
-       * Drop writes to integer attachments and retry so the rest of
-       * the pass still renders. */
-      bool retry = false;
-      for (unsigned i = 0; i < num_rtvs; i++) {
-        if (!IsIntegerColorFormat(info.colors[i].pixel_format))
-          continue;
-        if (info.colors[i].write_mask == 0 && !info.colors[i].blending_enabled)
-          continue;
-        info.colors[i].write_mask = 0;
-        info.colors[i].blending_enabled = false;
-        retry = true;
+      for (unsigned i = 0; i < num_rtvs; i++)
+        if (info.colors[i].pixel_format != WMTPixelFormatInvalid)
+          ERR("  color", i, ": wmt_format=", (uint32_t)info.colors[i].pixel_format,
+              " write_mask=", (uint32_t)info.colors[i].write_mask,
+              " ps_writes=", (ps_valid_render_targets >> i) & 1u);
+      /* Drop color writes a component-type mismatch can reach (seen
+       * with a float4-output PS on a Uint attachment) and retry so the
+       * rest of the pass still renders; if the failure isn't
+       * attributable to a mismatch, fall back to dropping every
+       * integer-attachment write. */
+      bool retried = false;
+      if (DropIntegerColorWrites(info, num_rtvs, ps_uint_output_registers, ps_sint_output_registers, false)) {
+        retried = true;
+        state_ = device_->GetMTLDevice().newRenderPipelineState(info, err);
+        if (state_ != nullptr)
+          WARN("Created PSO with mismatched integer color attachment write(s) dropped");
       }
-      if (retry) {
+      if (state_ == nullptr && DropIntegerColorWrites(info, num_rtvs, 0, 0, true)) {
+        retried = true;
         state_ = device_->GetMTLDevice().newRenderPipelineState(info, err);
         if (state_ != nullptr)
           WARN("Created PSO with writes to integer color attachment(s) dropped");
-        else
+      }
+      if (state_ == nullptr) {
+        if (retried)
           ERR("PSO retry without integer color writes also failed: ",
               err.description().getUTF8String());
-      }
-      if (state_ == nullptr)
         return this;
+      }
     }
 
     TRACE("Compiled 1 PSO");
@@ -142,6 +155,8 @@ public:
 private:
   UINT num_rtvs;
   UINT ps_valid_render_targets;
+  UINT ps_uint_output_registers;
+  UINT ps_sint_output_registers;
   WMTPixelFormat rtv_formats[8];
   WMTPixelFormat depth_stencil_format;
   WMTPrimitiveTopologyClass topology_class;

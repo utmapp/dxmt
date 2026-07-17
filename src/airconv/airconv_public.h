@@ -104,7 +104,15 @@ struct MTL_SHADER_REFLECTION {
     struct MTL_TESSELLATOR_REFLECTION Tessellator;
     struct MTL_GEOMETRY_SHADER_REFLECTION GeometryShader;
     struct MTL_POST_TESSELLATOR_REFLECTION PostTessellator;
-    uint32_t PSValidRenderTargets;
+    struct {
+      uint32_t PSValidRenderTargets;
+      /* Output registers declared uint/sint in the DXBC signature.
+       * Float-declared outputs are redeclared to match an integer RTV
+       * (see uint/sint_output_reg_mask), so only these registers can
+       * still type-mismatch an integer attachment. */
+      uint32_t PSUintOutputRegisterMask;
+      uint32_t PSSintOutputRegisterMask;
+    };
   };
   uint16_t ConstantBufferSlotMask;
   uint16_t SamplerSlotMask;
@@ -243,6 +251,11 @@ struct SM50_SHADER_PSO_PIXEL_SHADER_DATA {
   bool dual_source_blending;
   bool disable_depth_output;
   uint32_t unorm_output_reg_mask;
+  /* Float-typed output registers redeclared as uint/int because the
+   * bound RTV has an integer format (undefined in D3D11; real hardware
+   * bit-reinterprets, and Metal rejects the pipeline otherwise). */
+  uint32_t uint_output_reg_mask;
+  uint32_t sint_output_reg_mask;
 };
 
 struct SM50_IA_INPUT_ELEMENT {
