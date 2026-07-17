@@ -41,34 +41,44 @@ d3d10_src = [
 d3d11_ld_args      = ['-L' + windows_native_install_dir] # a nice trick to force relink
 d3d11_link_depends = []
 
-d3d11_dll = shared_library('d3d11', d3d11_src, d3d10_src, d3d11_res,
-  name_prefix         : '',
-  dependencies        : [ 
-    dxgi_dep, 
-    dxbc_parser_dep,
-    airconv_forward_dep,
-    dxmt_dep,
-    winemetal_dep,
-    util_dep ],
-  include_directories : [ dxmt_include_path ],
-  install             : true,
-  install_dir         : windows_native_install_dir,
-  vs_module_defs      : 'd3d11.def',
-  link_args           : d3d11_ld_args,
-  link_depends        : [ d3d11_link_depends ],
-)
+d3d11_deps = [
+  dxgi_dep,
+  dxbc_parser_dep,
+  airconv_forward_dep,
+  dxmt_dep,
+  winemetal_dep,
+  util_dep ]
+
+if dxmt_crossbuild
+  d3d11_lib = shared_library('d3d11', d3d11_src, d3d10_src, d3d11_res,
+    name_prefix         : '',
+    dependencies        : d3d11_deps,
+    include_directories : [ dxmt_include_path ],
+    install             : true,
+    install_dir         : windows_native_install_dir,
+    vs_module_defs      : 'd3d11.def',
+    link_args           : d3d11_ld_args,
+    link_depends        : [ d3d11_link_depends ],
+  )
+else
+  # Native: linked into the single dylib (see src/dxmt-native).
+  d3d11_lib = static_library('d3d11', d3d11_src, d3d10_src, d3d11_res,
+    dependencies        : d3d11_deps,
+    include_directories : [ dxmt_include_path ],
+  )
+endif
 
 d3d11_dep = declare_dependency(
-  link_with           : [ d3d11_dll ],
+  link_with           : [ d3d11_lib ],
   include_directories : [ dxmt_include_path ],
 )
 
 if wine_builtin_dll
 custom_target('postprocess_libd3d11',
-  input : d3d11_dll,
+  input : d3d11_lib,
   output: 'd3d11.dll.postproc',
   command : [ winebuild, '--builtin', '@INPUT@' ],
-  depends : d3d11_dll,
+  depends : d3d11_lib,
   build_by_default : true
 )
 endif

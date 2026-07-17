@@ -24,7 +24,9 @@
 
 namespace dxmt {
 
+#ifndef DXMT_NATIVE
 Logger Logger::s_instance("d3d12.log");
+#endif
 
 extern "C" HRESULT WINAPI
 D3D12CreateDevice(IUnknown *pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel, REFIID riid, void **ppDevice) {

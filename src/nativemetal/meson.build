@@ -13,16 +13,15 @@ winemetal_ld_args = [
   '-lsqlite3',
 ]
 
-winemetal_dll = shared_library('winemetal', winemetal_src,
-  name_prefix         : '',
+winemetal_lib = static_library('winemetal', winemetal_src,
   dependencies        : [ airconv_dep_darwin ],
   include_directories : [ dxmt_include_path, include_directories('.') ],
-  c_args              : ['-ObjC', '-DDXMT_NATIVE=1'],
-  link_args           : winemetal_ld_args,
-  build_rpath         : '@loader_path/:@loader_path/../../',
+  c_args              : ['-ObjC'],
 )
 
+# The frameworks ride along to whatever links this, i.e. the single dylib.
 winemetal_dep = declare_dependency(
-  link_with           : [ winemetal_dll ],
+  link_with           : [ winemetal_lib ],
   include_directories : [ include_directories('../winemetal') ],
+  link_args           : winemetal_ld_args,
 )

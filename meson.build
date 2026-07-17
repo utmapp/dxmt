@@ -185,7 +185,13 @@ if dxmt_crossbuild
   unix_install_dir = cpu_family + '-unix'
 else
   wine_builtin_dll = false
-  windows_native_install_dir = ''
+  # Native: every module links into the single libdxmt-native.dylib, which is
+  # the only installed artifact (see src/dxmt-native).
+  windows_native_install_dir = get_option('libdir')
+  # Each module normally carries its own Logger instance, one per DLL.  In a
+  # single image that would be several definitions of one symbol, so the
+  # modules drop theirs and dxmt-native defines the only one.
+  add_project_arguments('-DDXMT_NATIVE=1', language : ['c', 'cpp'])
 endif
 
 native_compiler_arch = cpu_family == 'aarch64' ? 'arm64' : 'x86_64'

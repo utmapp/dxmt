@@ -68,8 +68,10 @@ WMTColorSpace ConvertColorSpace(DXGI_COLOR_SPACE_TYPE color_space, bool hdr) {
 
 /**
  FIXME: duplicated implementation in dxgi_output.cpp
+ File-local so the two copies stay distinct symbols once dxgi and d3d11
+ link into one image; only used here.
 */
-uint32_t
+static uint32_t
 GetMonitorFormatBpp(DXGI_FORMAT Format) {
   switch (Format) {
   case DXGI_FORMAT_R8G8B8A8_UNORM:

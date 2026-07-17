@@ -19,7 +19,15 @@ dxbc_parser_dep = declare_dependency(
   include_directories : [ dxmt_include_path ],
 )
 
-if cpu_family == 'x86_64' or cpu_family == 'aarch64' or not dxmt_crossbuild
+if not dxmt_crossbuild
+
+# Native: dxmt_include_path already contains the native headers, so a separate
+# DXBCParserNative would be a byte-identical second copy of every symbol —
+# which collides once both consumers link into one dylib.
+dxbc_parser_native_lib = dxbc_parser_lib
+dxbc_parser_native_dep = dxbc_parser_dep
+
+elif cpu_family == 'x86_64' or cpu_family == 'aarch64'
 
 dxbc_parser_native_lib = static_library('DXBCParserNative', dxbc_parser_src,
   include_directories : [ dxmt_native_include_path ],

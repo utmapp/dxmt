@@ -27,7 +27,9 @@
 #include <exception>
 
 namespace dxmt {
+#ifndef DXMT_NATIVE
 Logger Logger::s_instance("d3d11.log");
+#endif
 
 extern "C" HRESULT WINAPI
 D3D11CoreCreateDevice(IDXGIFactory *pFactory, IDXGIAdapter *pAdapter,

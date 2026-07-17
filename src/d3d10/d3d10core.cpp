@@ -5,7 +5,9 @@
 #include "log/log.hpp"
 
 namespace dxmt {
+#ifndef DXMT_NATIVE
 Logger Logger::s_instance("d3d10core.log");
+#endif
 
 extern "C" HRESULT WINAPI D3D11CoreCreateDevice(
     IDXGIFactory *pFactory, IDXGIAdapter *pAdapter, UINT Flags, const D3D_FEATURE_LEVEL *pFeatureLevels,

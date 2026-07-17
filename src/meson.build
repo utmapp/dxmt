@@ -23,3 +23,8 @@ endif
 if get_option('enable_nvngx')
 subdir('nvngx')
 endif
+
+# Last: links every module above into the single native dylib.
+if not dxmt_crossbuild
+subdir('dxmt-native')
+endif
