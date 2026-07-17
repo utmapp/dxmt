@@ -21,3 +21,11 @@ _DXGIGetDebugInterface1
 # src/d3d10/d3d10core.def
 _D3D10CoreCreateDevice
 _D3D10CoreRegisterLayers
+
+# Embedder API — src/dxmt-native/dxmt_native.h
+_dxmt_event_create
+_dxmt_event_signal
+_dxmt_event_clear
+_dxmt_event_close
+_dxmt_event_dup_fd
+_dxmt_event_wait

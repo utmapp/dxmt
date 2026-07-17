@@ -26,6 +26,10 @@
 #include "dxmt_texture.hpp"
 #include "d3d11_resource.hpp"
 #include "util_win32_compat.h"
+#ifndef _WIN32
+#include "d3d11_texture_shared_native.hpp"
+#include <unistd.h>
+#endif
 
 namespace dxmt {
 
@@ -38,6 +42,11 @@ private:
   float min_lod = 0.0;
   D3DKMT_HANDLE local_kmt_ = 0;
   D3DKMT_HANDLE global_kmt_ = 0;
+#ifndef _WIN32
+  /* Native shm sharing: legacy-handle POD returned by GetSharedHandle;
+   * owns its fd.  magic == 0 when this texture is not shared. */
+  shm_texture_pod shm_pod_ = {};
+#endif
 
   using SRVBase =
       TResourceViewBase<tag_shader_resource_view<DeviceTexture<tag_texture>>>;
@@ -145,7 +154,21 @@ public:
         this->texture_ = std::move(u_texture);
       }
 
+#ifndef _WIN32
+  DeviceTexture(
+      const tag_texture::DESC1 *pDesc, Rc<Texture> &&u_texture, const shm_texture_pod &pod, MTLD3D11Device *pDevice
+  ) :
+      TResourceBase<tag_texture, IMTLMinLODClampable>(*pDesc, pDevice),
+      shm_pod_(pod) {
+        this->texture_ = std::move(u_texture);
+      }
+#endif
+
   ~DeviceTexture() {
+#ifndef _WIN32
+    if (shm_pod_.magic == DXMT_SHARED_TEXTURE_MAGIC && shm_pod_.fd >= 0)
+      close(shm_pod_.fd);
+#endif
     if (local_kmt_) {
       D3DKMT_DESTROYALLOCATION destroy = {};
       destroy.hDevice = this->m_parent->GetLocalD3DKMT();
@@ -285,6 +308,15 @@ public:
       return S_OK;
     }
 
+#ifndef _WIN32
+    /* Legacy-handle semantics: the same POD pointer every call, valid for
+     * the texture's lifetime, never closed by the caller. */
+    if (shm_pod_.magic == DXMT_SHARED_TEXTURE_MAGIC) {
+      *pSharedHandle = reinterpret_cast<HANDLE>(&shm_pod_);
+      return S_OK;
+    }
+#endif
+
     if (!global_kmt_) {
       return E_INVALIDARG;
     }
@@ -381,6 +413,35 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
 
   auto shared_flag =
       D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+#ifndef _WIN32
+  if (finalDesc.MiscFlags & shared_flag) {
+    /* Native: no D3DKMT/NT handles; share as a linear texture over
+     * anonymous shm (see d3d11_texture_shared_native.hpp). */
+    if (finalDesc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) {
+      ERR("DeviceTexture: NT-handle sharing not supported natively");
+      return E_FAIL;
+    }
+    if constexpr (!std::is_same_v<typename tag::DESC1, D3D11_TEXTURE2D_DESC1>) {
+      ERR("DeviceTexture: only Texture2D can be shared natively");
+      return E_FAIL;
+    } else {
+      Rc<Texture> shm_texture;
+      Rc<TextureAllocation> shm_allocation;
+      shm_texture_pod pod;
+      HRESULT hr = AllocateShmLinearTexture2D(
+          pDevice, finalDesc, info, -1, 0, 0, shm_texture, shm_allocation, pod
+      );
+      if (FAILED(hr))
+        return hr;
+      texture = std::move(shm_texture);
+      initialize(std::move(shm_allocation));
+      *ppTexture = reinterpret_cast<typename tag::COM_IMPL *>(
+          ref(new DeviceTexture<tag>(&finalDesc, std::move(texture), pod, pDevice))
+      );
+      return S_OK;
+    }
+  }
+#else
   if (finalDesc.MiscFlags & shared_flag) {
     if (!(pDevice->GetLocalD3DKMT() & 0xc0000000)) {
       ERR("DeviceTexture: Invalid device handle");
@@ -442,6 +503,7 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
     );
     return S_OK;
   }
+#endif /* _WIN32 */
 
   Flags<TextureAllocationFlag> flags;
   flags.set(finalDesc.CPUAccessFlags ? TextureAllocationFlag::GpuManaged : TextureAllocationFlag::GpuPrivate);
@@ -509,6 +571,68 @@ ImportSharedTextureInternal(
   Com<DeviceTexture<tag>> device_texture = (ref(new DeviceTexture<tag>(&finalDesc, std::move(texture), pDevice)));
   return device_texture->QueryInterface(riid, ppTexture);
 }
+
+#ifndef _WIN32
+
+/* Native: hResource is a pointer to the exporter's shm_texture_pod, with
+ * the fd field already valid in this process.  The fd is dup'd internally;
+ * the caller keeps ownership of its copy. */
+HRESULT
+ImportSharedTexture(MTLD3D11Device *pDevice, HANDLE hResource, REFIID riid, void **ppTexture) {
+  InitReturnPtr(ppTexture);
+
+  if (!hResource) {
+    WARN("ImportSharedTexture: NULL handle");
+    return E_INVALIDARG;
+  }
+
+  if (ppTexture == nullptr)
+    return S_FALSE;
+
+  const auto *pod = reinterpret_cast<const shm_texture_pod *>(hResource);
+  if (pod->magic != DXMT_SHARED_TEXTURE_MAGIC || pod->version != DXMT_SHARED_HANDLE_VERSION || pod->fd < 0) {
+    WARN("ImportSharedTexture: bad shm descriptor");
+    return E_INVALIDARG;
+  }
+
+  D3D11_TEXTURE2D_DESC1 desc = {};
+  desc.Width = pod->width;
+  desc.Height = pod->height;
+  desc.MipLevels = pod->mip_levels;
+  desc.ArraySize = pod->array_size;
+  desc.Format = (DXGI_FORMAT)pod->dxgi_format;
+  desc.SampleDesc.Count = pod->sample_count;
+  desc.SampleDesc.Quality = 0;
+  desc.Usage = D3D11_USAGE_DEFAULT;
+  desc.BindFlags = pod->bind_flags;
+  desc.CPUAccessFlags = pod->cpu_access;
+  desc.MiscFlags = pod->misc_flags;
+  desc.TextureLayout = D3D11_TEXTURE_LAYOUT_UNDEFINED;
+
+  WMTTextureInfo info;
+  D3D11_TEXTURE2D_DESC1 finalDesc;
+  if (FAILED(CreateMTLTextureDescriptor(pDevice, &desc, &finalDesc, &info))) {
+    WARN("ImportSharedTexture: invalid texture description");
+    return E_INVALIDARG;
+  }
+
+  Rc<Texture> texture;
+  Rc<TextureAllocation> allocation;
+  shm_texture_pod own_pod;
+  HRESULT hr = AllocateShmLinearTexture2D(
+      pDevice, finalDesc, info, pod->fd, pod->stride, pod->size, texture, allocation, own_pod
+  );
+  if (FAILED(hr))
+    return hr;
+  /* Contents come from the producer; no initialization. */
+  texture->rename(std::move(allocation));
+
+  Com<DeviceTexture<tag_texture_2d>> device_texture =
+      ref(new DeviceTexture<tag_texture_2d>(&finalDesc, std::move(texture), own_pod, pDevice));
+  return device_texture->QueryInterface(riid, ppTexture);
+}
+
+#else /* _WIN32 */
 
 HRESULT
 ImportSharedTexture(MTLD3D11Device *pDevice, HANDLE hResource, REFIID riid, void **ppTexture) {
@@ -584,6 +708,8 @@ ImportSharedTexture(MTLD3D11Device *pDevice, HANDLE hResource, REFIID riid, void
     return E_INVALIDARG;
   }
 }
+
+#endif /* _WIN32 */
 
 HRESULT
 ImportSharedTextureFromNtHandle(MTLD3D11Device *pDevice, HANDLE hResource, REFIID riid, void **ppTexture) {

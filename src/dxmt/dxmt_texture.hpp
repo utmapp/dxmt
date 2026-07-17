@@ -271,6 +271,11 @@ public:
 
   Rc<TextureAllocation> allocate(Flags<TextureAllocationFlag> flags);
   Rc<TextureAllocation> import(mach_port_t mach_port);
+  /* Linear texture over a caller-provided buffer (must be constructed with
+   * the (bytes_per_image, bytes_per_row, ...) ctor).  Used by the native
+   * shm-backed shared-texture path. */
+  Rc<TextureAllocation>
+  allocateFromBuffer(WMT::Reference<WMT::Buffer> &&buffer, void *mapped, Flags<TextureAllocationFlag> flags);
 
   TextureView &view(TextureViewKey key);
   TextureView &view(TextureViewKey key, TextureAllocation *allocation);

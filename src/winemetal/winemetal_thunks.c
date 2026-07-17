@@ -1232,3 +1232,13 @@ MTLCommandQueue_addResidencySet(obj_handle_t queue, obj_handle_t residency_set) 
   params.arg = residency_set;
   UNIX_CALL(137, &params);
 }
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newBufferMapped(obj_handle_t device, struct WMTBufferInfo *info) {
+  struct unixcall_mtldevice_newbuffer params;
+  params.device = device;
+  WMT_MEMPTR_SET(params.info, info);
+  params.ret = 0;
+  UNIX_CALL(138, &params);
+  return params.ret;
+}

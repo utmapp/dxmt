@@ -1882,6 +1882,17 @@ WINEMETAL_API obj_handle_t MTLDevice_newEvent(obj_handle_t device);
 WINEMETAL_API void
 MTLBuffer_updateContents(obj_handle_t buffer, uint64_t offset, struct WMTConstMemoryPointer data, uint64_t length);
 
+/*
+ * Wrap an existing page-aligned mapping in an MTLBuffer
+ * (newBufferWithBytesNoCopy) whose deallocator munmap()s it, so the mapping
+ * lives exactly as long as the last Metal reference — a command buffer in
+ * flight keeps the memory valid after the D3D resource is released.  Native
+ * builds only (used for shm-backed shared textures); returns 0 on Wine.
+ * memory/length must be page-aligned; length is the mmap'd length.
+ */
+WINEMETAL_API obj_handle_t
+MTLDevice_newBufferMapped(obj_handle_t device, struct WMTBufferInfo *info);
+
 WINEMETAL_API obj_handle_t SharedEventListener_create();
 
 WINEMETAL_API void SharedEventListener_start(obj_handle_t shared_event_listener);

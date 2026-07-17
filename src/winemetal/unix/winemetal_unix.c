@@ -9,6 +9,7 @@
 #include "objc/objc-runtime.h"
 #include <bootstrap.h>
 #include <mach/mach_port.h>
+#include <sys/mman.h>
 #define WINEMETAL_API
 #include "../winemetal_thunks.h"
 #include "../airconv_thunks.h"
@@ -169,6 +170,32 @@ _MTLDevice_newBuffer(void *obj) {
   }
   params->ret = (obj_handle_t)buffer;
   info->gpu_address = [buffer gpuAddress];
+  return STATUS_SUCCESS;
+}
+
+/* Native-only (see winemetal.h): buffer over an existing page-aligned
+ * mapping whose deallocator munmaps it, so the mapping's lifetime is the
+ * MTLBuffer's, not the D3D resource's. */
+static NTSTATUS
+_MTLDevice_newBufferMapped(void *obj) {
+#ifdef DXMT_NATIVE
+  struct unixcall_mtldevice_newbuffer *params = obj;
+  id<MTLDevice> device = (id<MTLDevice>)params->device;
+  struct WMTBufferInfo *info = params->info.ptr;
+  void *memory = info->memory.ptr;
+  uint64_t length = info->length;
+  id<MTLBuffer> buffer = [device newBufferWithBytesNoCopy:memory
+                                                   length:length
+                                                  options:(enum MTLResourceOptions)info->options
+                                              deallocator:^(void *ptr, NSUInteger len) {
+                                                munmap(ptr, len);
+                                              }];
+  params->ret = (obj_handle_t)buffer;
+  info->gpu_address = [buffer gpuAddress];
+#else
+  struct unixcall_mtldevice_newbuffer *params = obj;
+  params->ret = 0;
+#endif
   return STATUS_SUCCESS;
 }
 
@@ -2508,24 +2535,47 @@ _SharedEventListener_destroy(void *obj) {
 }
 
 #else
+
+#include "dxmt_native_event.h"
+
+/* Native: the HANDLE is a dxmt_native_event (see dxmt_native_event.h) created
+ * by the embedder and handed to ID3D11Fence::SetEventOnCompletion.  The
+ * embedder may close the HANDLE before the GPU reaches the value (its waiter
+ * only holds the exported fd), so the block must not capture the HANDLE —
+ * take a reference on the shared core now and signal+release through it. */
 static NTSTATUS
 _MTLSharedEvent_setWin32EventAtValue(void *obj) {
-  // nop
+  struct unixcall_mtlsharedevent_setevent *params = obj;
+  struct dxmt_evt_core *core = dxmt_evt_core_retain((void *)params->event_handle);
+  if (!core)
+    return STATUS_SUCCESS;
+  [(id<MTLSharedEvent>)params->shared_event
+      notifyListener:(MTLSharedEventListener *)params->shared_event_listener
+             atValue:params->value
+               block:^(id<MTLSharedEvent> _e, uint64_t _v) {
+                 dxmt_evt_core_signal_release(core);
+               }];
   return STATUS_SUCCESS;
 }
 
 static NTSTATUS
 _SharedEventListener_start(void *obj) {
+  /* No runloop needed: event signaling is thread-safe, so the block runs
+   * directly on the listener's dispatch queue. */
   return STATUS_SUCCESS;
 }
 
 static NTSTATUS
 _SharedEventListener_create(void *obj) {
+  struct unixcall_generic_obj_ret *params = obj;
+  params->ret = (obj_handle_t)[[MTLSharedEventListener alloc] init];
   return STATUS_SUCCESS;
 }
 
 static NTSTATUS
 _SharedEventListener_destroy(void *obj) {
+  struct unixcall_generic_obj_noret *params = obj;
+  [(MTLSharedEventListener *)params->handle release];
   return STATUS_SUCCESS;
 }
 
@@ -3057,6 +3107,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLResidencySet_removeAllAllocations,
     &_MTLResidencySet_commit,
     &_MTLCommandQueue_addResidencySet,
+    &_MTLDevice_newBufferMapped,
 };
 
 #ifndef DXMT_NATIVE
@@ -3199,5 +3250,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLResidencySet_removeAllAllocations,
     &_MTLResidencySet_commit,
     &_MTLCommandQueue_addResidencySet,
+    &_MTLDevice_newBufferMapped,
 };
 #endif

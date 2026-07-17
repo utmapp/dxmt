@@ -782,6 +782,11 @@ public:
     return Reference<Buffer>(MTLDevice_newBuffer(handle, &info));
   }
 
+  Reference<Buffer>
+  newBufferMapped(WMTBufferInfo &info) {
+    return Reference<Buffer>(MTLDevice_newBufferMapped(handle, &info));
+  }
+
   Reference<SamplerState>
   newSamplerState(WMTSamplerInfo &info) {
     return Reference<SamplerState>(MTLDevice_newSamplerState(handle, &info));

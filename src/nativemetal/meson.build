@@ -2,6 +2,7 @@ winemetal_src = [
   '../winemetal/winemetal_thunks.c',
   '../winemetal/unix/winemetal_unix.c',
   '../winemetal/unix/cache.c',
+  '../winemetal/unix/dxmt_native_event.c',
 ]
 winemetal_link_depends = []
 

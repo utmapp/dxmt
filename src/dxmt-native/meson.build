@@ -41,6 +41,8 @@ dxmt_native_umbrella = shared_library('dxmt-native',
   install             : true,
 )
 
+install_headers('dxmt_native.h', subdir : 'dxmt-native')
+
 pkgconf_data = configuration_data()
 pkgconf_data.set('prefix', get_option('prefix'))
 pkgconf_data.set('libdir', get_option('libdir'))

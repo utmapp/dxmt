@@ -10,3 +10,13 @@ The most recent development builds can be found [here](https://github.com/3Shain
 ## Build
 
 See [DEVELOPMENT.md](docs/DEVELOPMENT.md)
+
+## Native backend
+
+A native (non-Wine) macOS build links every module into a single
+`libdxmt-native.dylib` that exports the standard D3D11/DXGI/D3D10 entry
+points plus a small embedder API (`dxmt_native.h`): Win32-style events
+(`dxmt_event_*`) and cross-process shared textures over POSIX shm. An
+embedder `dlopen()`s the one dylib; `pkg-config --cflags --libs
+dxmt-native` provides the include and link flags. Build it by configuring
+without a cross file (see [DEVELOPMENT.md](docs/DEVELOPMENT.md)).
