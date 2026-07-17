@@ -100,7 +100,31 @@ public:
 
     if (state_ == nullptr) {
       ERR("Failed to create PSO: ", err.description().getUTF8String());
-      return this;
+      /* D3D11 leaves color writes undefined when the shader output and
+       * RTV component types mismatch; Metal instead fails the whole
+       * pipeline (seen with a float4-output PS on a Uint attachment).
+       * Drop writes to integer attachments and retry so the rest of
+       * the pass still renders. */
+      bool retry = false;
+      for (unsigned i = 0; i < num_rtvs; i++) {
+        if (!IsIntegerColorFormat(info.colors[i].pixel_format))
+          continue;
+        if (info.colors[i].write_mask == 0 && !info.colors[i].blending_enabled)
+          continue;
+        info.colors[i].write_mask = 0;
+        info.colors[i].blending_enabled = false;
+        retry = true;
+      }
+      if (retry) {
+        state_ = device_->GetMTLDevice().newRenderPipelineState(info, err);
+        if (state_ != nullptr)
+          WARN("Created PSO with writes to integer color attachment(s) dropped");
+        else
+          ERR("PSO retry without integer color writes also failed: ",
+              err.description().getUTF8String());
+      }
+      if (state_ == nullptr)
+        return this;
     }
 
     TRACE("Compiled 1 PSO");

@@ -140,6 +140,37 @@ template <> struct equal_to<MTL_GRAPHICS_PIPELINE_DESC> {
 
 namespace dxmt {
 
+/* True for pure integer (Uint/Sint) color formats.  Used to drop color
+ * writes when Metal rejects a pipeline over a shader-output/attachment
+ * component-type mismatch, which D3D11 leaves undefined. */
+inline bool
+IsIntegerColorFormat(WMTPixelFormat format) {
+  switch (format) {
+  case WMTPixelFormatR8Uint:
+  case WMTPixelFormatR8Sint:
+  case WMTPixelFormatR16Uint:
+  case WMTPixelFormatR16Sint:
+  case WMTPixelFormatRG8Uint:
+  case WMTPixelFormatRG8Sint:
+  case WMTPixelFormatR32Uint:
+  case WMTPixelFormatR32Sint:
+  case WMTPixelFormatRG16Uint:
+  case WMTPixelFormatRG16Sint:
+  case WMTPixelFormatRGBA8Uint:
+  case WMTPixelFormatRGBA8Sint:
+  case WMTPixelFormatRGB10A2Uint:
+  case WMTPixelFormatRG32Uint:
+  case WMTPixelFormatRG32Sint:
+  case WMTPixelFormatRGBA16Uint:
+  case WMTPixelFormatRGBA16Sint:
+  case WMTPixelFormatRGBA32Uint:
+  case WMTPixelFormatRGBA32Sint:
+    return true;
+  default:
+    return false;
+  }
+}
+
 class MTLCompiledGraphicsPipeline : public ThreadpoolWork {
 public:
   /**

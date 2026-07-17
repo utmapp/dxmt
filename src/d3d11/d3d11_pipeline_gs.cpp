@@ -135,7 +135,27 @@ public:
 
     if (state_mesh_ == nullptr) {
       ERR("Failed to create mesh PSO: ", err.description().getUTF8String());
-      return this;
+      /* Same undefined-behavior escape hatch as the ordinary graphics
+       * PSO path: drop color writes to integer attachments the shader
+       * output type can't match and retry. */
+      bool retry = false;
+      for (unsigned i = 0; i < num_rtvs; i++) {
+        if (!IsIntegerColorFormat(info.colors[i].pixel_format))
+          continue;
+        if (info.colors[i].write_mask == 0 && !info.colors[i].blending_enabled)
+          continue;
+        info.colors[i].write_mask = 0;
+        info.colors[i].blending_enabled = false;
+        retry = true;
+      }
+      if (retry) {
+        state_mesh_ = device_->GetMTLDevice().newRenderPipelineState(info, err);
+        if (state_mesh_ != nullptr)
+          WARN("Created mesh PSO with writes to integer color attachment(s) dropped");
+        else
+          ERR("Mesh PSO retry without integer color writes also failed: ",
+              err.description().getUTF8String());
+      }
     }
     return this;
   }
