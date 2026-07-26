@@ -56,6 +56,16 @@ static cl::opt<bool> DisassembleDXBC(
   "disas-dxbc", cl::init(false), cl::desc("Disassemble dxbc shader")
 );
 
+static cl::opt<SM50_SHADER_METAL_VERSION> MetalVersion(
+  "metal-version", cl::init(SM50_SHADER_METAL_320),
+  cl::desc("Metal version to target"),
+  cl::values(
+    clEnumValN(SM50_SHADER_METAL_300, "3.0", "Metal 3.0"),
+    clEnumValN(SM50_SHADER_METAL_310, "3.1", "Metal 3.1"),
+    clEnumValN(SM50_SHADER_METAL_320, "3.2", "Metal 3.2")
+  )
+);
+
 static cl::opt<bool>
   OptLevelO0("O0", cl::desc("Optimization level 0. Similar to clang -O0. "));
 
@@ -216,7 +226,7 @@ int main(int argc, char **argv) {
   }
 
   SM50_SHADER_COMMON_DATA data;
-  data.metal_version = SM50_SHADER_METAL_320;
+  data.metal_version = MetalVersion;
   data.flags = {};
   data.next = 0;
   data.type = SM50_SHADER_COMMON;

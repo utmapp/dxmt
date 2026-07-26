@@ -12,6 +12,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/VersionTuple.h"
 #include "llvm/Support/raw_ostream.h"
 #include <bit>
 #include <memory>
@@ -211,27 +212,35 @@ void setup_metal_version(llvm::Module &module, SM50_SHADER_METAL_VERSION metal_v
 
   auto airVersion = module.getOrInsertNamedMetadata("air.version");
   auto airLangVersion = module.getOrInsertNamedMetadata("air.language_version");
+
+  // AIR version, MSL version and the deployment target in the triple all move
+  // together; a module claiming one and carrying another is rejected.
+  uint32_t air_minor, msl_minor, macos_major;
   switch (metal_version) {
-  case SM50_SHADER_METAL_320: {
-    airVersion->addOperand(
-        MDTuple::get(context, {createUnsignedInteger(2), createUnsignedInteger(7), createUnsignedInteger(0)})
-    );
-    airLangVersion->addOperand(MDTuple::get(
-        context, {createString("Metal"), createUnsignedInteger(3), createUnsignedInteger(2), createUnsignedInteger(0)}
-    ));
-    module.setTargetTriple("air64-apple-macosx15.0.0");
+  case SM50_SHADER_METAL_320:
+    air_minor = 7, msl_minor = 2, macos_major = 15;
+    break;
+  case SM50_SHADER_METAL_310:
+    air_minor = 6, msl_minor = 1, macos_major = 14;
+    break;
+  default:
+    air_minor = 5, msl_minor = 0, macos_major = 13;
     break;
   }
-  default: {
-    airVersion->addOperand(
-        MDTuple::get(context, {createUnsignedInteger(2), createUnsignedInteger(6), createUnsignedInteger(0)})
-    );
-    airLangVersion->addOperand(MDTuple::get(
-        context, {createString("Metal"), createUnsignedInteger(3), createUnsignedInteger(1), createUnsignedInteger(0)}
-    ));
-    break;
-  }
-  }
+
+  airVersion->addOperand(
+      MDTuple::get(context, {createUnsignedInteger(2), createUnsignedInteger(air_minor), createUnsignedInteger(0)})
+  );
+  airLangVersion->addOperand(MDTuple::get(
+      context, {createString("Metal"), createUnsignedInteger(3), createUnsignedInteger(msl_minor), createUnsignedInteger(0)}
+  ));
+  module.setTargetTriple("air64-apple-macosx" + std::to_string(macos_major) + ".0.0");
+  // Not setSDKVersion(): that appends a second module flag and the baseline one
+  // initializeModule() wrote would keep winning the lookup.
+  module.setModuleFlag(
+      Module::ModFlagBehavior::Warning, "SDK Version",
+      ConstantAsMetadata::get(ConstantDataArray::get(context, ArrayRef<uint32_t>{macos_major, 0u}))
+  );
 }
 
 llvm::Error convert_dxbc_pixel_shader(

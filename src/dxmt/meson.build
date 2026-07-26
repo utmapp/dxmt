@@ -28,7 +28,12 @@ dxmt_shaders = [
   'dxmt_command.metal'
 ]
 
-dxmt_shaders_ir = metalir_generator.process(dxmt_shaders)
+# Without an explicit target this tracks whatever the installed Metal toolchain
+# defaults to, which is far newer than anything these shaders use.
+dxmt_shaders_ir = metalir_generator.process(
+  dxmt_shaders,
+  extra_args: ['-std=metal3.0', '--target=air64-apple-macos13.0'],
+)
 
 dxmt_shaders_lib = metallib_generator.process(dxmt_shaders_ir)
 
