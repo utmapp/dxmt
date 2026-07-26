@@ -38,7 +38,7 @@ NvAPI_Unload() {
 NVAPI_INTERFACE
 NvAPI_SYS_GetDriverAndBranchVersion(NvU32 *pDriverVersion,
                                     NvAPI_ShortString szBuildBranchString) {
-  std::string build_str = std::format("r{}_000", NVAPI_SDK_VERSION);
+  std::string build_str = "r" + std::to_string(NVAPI_SDK_VERSION) + "_000";
 
   if (!pDriverVersion || !szBuildBranchString)
     return NVAPI_INVALID_ARGUMENT;
@@ -51,7 +51,7 @@ NvAPI_SYS_GetDriverAndBranchVersion(NvU32 *pDriverVersion,
 
 NVAPI_INTERFACE
 NvAPI_GetDisplayDriverVersion(NvDisplayHandle hNvDisplay, NV_DISPLAY_DRIVER_VERSION *pVersion) {
-  std::string build_str = std::format("r{}_000", NVAPI_SDK_VERSION);
+  std::string build_str = "r" + std::to_string(NVAPI_SDK_VERSION) + "_000";
   std::string adapter_str = "NVIDIA GeForce RTX";
 
   if (!pVersion)

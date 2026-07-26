@@ -6,7 +6,7 @@
 #include "llvm/IR/Value.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include <format>
+#include <string>
 
 namespace llvm::air {
 
@@ -72,17 +72,17 @@ AIRBuilder::getTypeOverloadSuffix(Type *Ty, Signedness Sign) {
     if (Sign != Signedness::DontCare)
       Ret += "f.";
     if (PointerAddrSpace != ~0u)
-      Ret += std::format("p{}", PointerAddrSpace);
+      Ret += "p" + std::to_string(PointerAddrSpace);
     if (VectorSize)
-      Ret += std::format("v{}", VectorSize);
+      Ret += "v" + std::to_string(VectorSize);
     Ret += "f32";
   } else if (TyScaler->isHalfTy()) {
     if (Sign != Signedness::DontCare)
       Ret += "f.";
     if (PointerAddrSpace != ~0u)
-      Ret += std::format("p{}", PointerAddrSpace);
+      Ret += "p" + std::to_string(PointerAddrSpace);
     if (VectorSize)
-      Ret += std::format("v{}", VectorSize);
+      Ret += "v" + std::to_string(VectorSize);
     Ret += "f16";
   } else if (TyScaler->isIntegerTy()) {
     if (Sign == Signedness::Signed)
@@ -90,10 +90,10 @@ AIRBuilder::getTypeOverloadSuffix(Type *Ty, Signedness Sign) {
     else if (Sign == Signedness::Unsigned)
       Ret += "u.";
     if (PointerAddrSpace != ~0u)
-      Ret += std::format("p{}", PointerAddrSpace);
+      Ret += "p" + std::to_string(PointerAddrSpace);
     if (VectorSize)
-      Ret += std::format("v{}", VectorSize);
-    Ret += std::format("i{}", cast<IntegerType>(TyScaler)->getBitWidth());
+      Ret += "v" + std::to_string(VectorSize);
+    Ret += "i" + std::to_string(cast<IntegerType>(TyScaler)->getBitWidth());
   } else {
     Ret += "unknown_type_overload";
   }
@@ -278,7 +278,7 @@ AIRBuilder::CreateAtomicCmpXchg(
 Type *
 AIRBuilder::getTextureHandleType(Texture::ResourceKind Kind) {
   assert(Kind <= Texture::last_resource_kind);
-  return getOrCreateStructType(std::format("struct._{}_t", TextureInfo[Kind].air_symbol_suffix))
+  return getOrCreateStructType(std::string("struct._") + TextureInfo[Kind].air_symbol_suffix + "_t")
       ->getPointerTo(1);
 };
 

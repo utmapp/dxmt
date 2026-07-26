@@ -9,7 +9,7 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdint>
-#include <format>
+#include <string>
 #include <utility>
 
 namespace dxmt::dxbc {
@@ -467,9 +467,10 @@ convert_dxbc_geometry_shader(
       break;
     }
     default:
-      return llvm::make_error<UnsupportedFeature>(std::format(
-          "unhandled geometry shader input primitive strip: {}", (uint32_t)pShaderInternal->gs_input_primitive
-      ));
+      return llvm::make_error<UnsupportedFeature>(
+          "unhandled geometry shader input primitive strip: " +
+          std::to_string((uint32_t)pShaderInternal->gs_input_primitive)
+      );
     }
   } else {
     auto leading_vertex_index = builder.CreateMul(builder.getInt32(vertex_per_primitive), primitive_id_in_warp);
@@ -843,9 +844,10 @@ convert_dxbc_vertex_for_geometry_shader(
         break;
       }
       default:
-        return llvm::make_error<UnsupportedFeature>(std::format(
-            "unhandled geometry shader input primitive strip: {}", (uint32_t)pGeometryStage->gs_input_primitive
-        ));
+        return llvm::make_error<UnsupportedFeature>(
+            "unhandled geometry shader input primitive strip: " +
+            std::to_string((uint32_t)pGeometryStage->gs_input_primitive)
+        );
       }
     } else {
       // primitive is valid if all vertex is valid

@@ -24,7 +24,8 @@
 #include "dxmt_presenter.hpp"
 #include <atomic>
 #include <cfloat>
-#include <format>
+#include <cstdarg>
+#include <cstdio>
 
 /**
 Ref: https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_3/nf-dxgi1_3-idxgiswapchain2-setmaximumframelatency
@@ -33,6 +34,16 @@ This value is 1 by default.
 constexpr size_t kSwapchainLatency = 1;
 
 namespace dxmt {
+
+static void __attribute__((format(printf, 2, 3)))
+PrintHUDLine(HUDState &hud, const char *format, ...) {
+  char line[64];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(line, sizeof(line), format, args);
+  va_end(args);
+  hud.printLine(line);
+}
 
 WMTPixelFormat ConvertSwapChainFormat(DXGI_FORMAT format) {
   switch (format) {
@@ -848,46 +859,44 @@ public:
       text[22] = 'S';
     }
     hud.printLine(text);
-    hud.printLine(std::format(
-        "Commit: {:2} -{:4.1f} -{:4.1f}", std::min(frame.command_buffer_count, 99u),
+    PrintHUDLine(
+        hud, "Commit: %2u -%4.1f -%4.1f", std::min(frame.command_buffer_count, 99u),
         std::min(average.commit_interval.count() / 1000000.0, 99.9),
         std::min(statistics.max().commit_interval.count() / 1000000.0, 99.9)
-    ));
-    hud.printLine(std::format(
-        "Sync:   {:2} {:4.1f}  {:2} {:4.1f} {:2}", std::min(frame.sync_count, 99u),
+    );
+    PrintHUDLine(
+        hud, "Sync:   %2u %4.1f  %2u %4.1f %2u", std::min(frame.sync_count, 99u),
         std::min(average.sync_interval.count() / 1000000.0, 99.9), std::min(statistics.max().event_stall, 99u),
         std::min(average.present_latency_interval.count() / 1000000.0, 99.9), frame.latency
-    ));
-    hud.printLine(std::format(
-        "Encode: {:4.1f}+{:4.1f}+{:4.1f}={:4.1f}", std::min(average.encode_prepare_interval.count() / 1000000.0, 99.9),
+    );
+    PrintHUDLine(
+        hud, "Encode: %4.1f+%4.1f+%4.1f=%4.1f", std::min(average.encode_prepare_interval.count() / 1000000.0, 99.9),
         std::min((average.encode_flush_interval - average.drawable_blocking_interval).count() / 1000000.0, 99.9),
         std::min(average.drawable_blocking_interval.count() / 1000000.0, 99.9),
         std::min((average.encode_prepare_interval + average.encode_flush_interval).count() / 1000000.0, 99.9)
-    ));
-    hud.printLine(std::format(
-        "Render:{:3}+{:<3} Clear:{:3}+{:<2}", std::min(frame.render_pass_count - frame.render_pass_optimized, 999u),
+    );
+    PrintHUDLine(
+        hud, "Render:%3u+%-3u Clear:%3u+%-2u", std::min(frame.render_pass_count - frame.render_pass_optimized, 999u),
         std::min(frame.render_pass_optimized, 999u),
         std::min(frame.clear_pass_count - frame.clear_pass_optimized, 999u), std::min(frame.clear_pass_optimized, 99u)
-    ));
+    );
     {
       /* scaler info */
       auto &info = frame.last_scaler_info;
       if (info.type == ScalerType::Temporal) {
         auto &info = frame.last_scaler_info;
-        hud.printLine(std::format(
-            "MetalFX: Temporal {} {}", info.auto_exposure ? "AEXP" : "", info.motion_vector_highres ? "HMV" : ""
-        ));
-        hud.printLine(std::format(
-            "Scale: {:4}x{:4}->{:4}x{:4}", info.input_width, info.input_height, info.output_width, info.output_height
-        ));
+        PrintHUDLine(
+            hud, "MetalFX: Temporal %s %s", info.auto_exposure ? "AEXP" : "", info.motion_vector_highres ? "HMV" : ""
+        );
+        PrintHUDLine(
+            hud, "Scale: %4ux%4u->%4ux%4u", info.input_width, info.input_height, info.output_width, info.output_height
+        );
       }
       if (info.type == ScalerType::Spatial) {
-        hud.printLine(std::format(
-            "MetalFX: Spatial"
-        ));
-        hud.printLine(std::format(
-            "Scale: {:4}x{:4}->{:4}x{:4}", info.input_width, info.input_height, info.output_width, info.output_height
-        ));
+        hud.printLine("MetalFX: Spatial");
+        PrintHUDLine(
+            hud, "Scale: %4ux%4u->%4ux%4u", info.input_width, info.input_height, info.output_width, info.output_height
+        );
       }
     }
     hud.end();
