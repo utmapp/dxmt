@@ -7,7 +7,7 @@ project('dxmt', ['c', 'cpp'], version : 'v0.1', meson_version: '>=1.3.0', defaul
 
 fs = import('fs')
 
-dxmt_crossbuild = meson.is_cross_build()
+dxmt_crossbuild = host_machine.system() == 'windows'
 
 cpp = meson.get_compiler('cpp')
 cc = meson.get_compiler('c')
