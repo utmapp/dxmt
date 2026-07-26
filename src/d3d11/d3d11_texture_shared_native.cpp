@@ -8,9 +8,15 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
+#include <sys/posix_shm.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+/* An app group prefix must leave room for "/" and one nonce digit within
+ * PSHMNAMLEN. */
+#define APP_SANDBOX_GROUP_ID_MAX (PSHMNAMLEN - 2)
 
 namespace dxmt {
 
@@ -24,10 +30,29 @@ page_align(uint64_t n) {
  * the only name. */
 static int
 anon_shm_file(uint64_t size) {
+  /* Under App Sandbox a shm name must live in the app group container, i.e. be
+   * prefixed with the group identifier instead of '/'; anything else is
+   * denied.  The prefix leaves no room for the tag or the pid, so a sandboxed
+   * name is just as much of the nonce as still fits -- eight hex digits while
+   * the prefix is at most 22 chars, down to one at the limit. */
+  const char *group = getenv("APP_SANDBOX_GROUP_ID");
+  if (group && !group[0])
+    group = nullptr;
+  if (group && strlen(group) > APP_SANDBOX_GROUP_ID_MAX) {
+    ERR("shm texture: APP_SANDBOX_GROUP_ID is ", strlen(group), " chars, at most ", APP_SANDBOX_GROUP_ID_MAX, " fit");
+    errno = EINVAL;
+    return -1;
+  }
+  const size_t nonce_room = group ? PSHMNAMLEN - strlen(group) - 1 : 8;
+  const unsigned nonce_digits = nonce_room < 8 ? (unsigned)nonce_room : 8;
+
   for (int attempt = 0; attempt < 64; attempt++) {
     /* macOS PSHMNAMLEN caps shm names at 31 chars. */
-    char name[32];
-    snprintf(name, sizeof(name), "/dxmt-%x-%08x", getpid(), arc4random());
+    char name[PSHMNAMLEN + 1];
+    if (group)
+      snprintf(name, sizeof(name), "%s/%0*x", group, (int)nonce_digits, arc4random() >> (32 - 4 * nonce_digits));
+    else
+      snprintf(name, sizeof(name), "/dxmt-%x-%08x", getpid(), arc4random());
     int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
     if (fd < 0) {
       if (errno == EEXIST)
