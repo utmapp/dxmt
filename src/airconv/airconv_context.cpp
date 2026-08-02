@@ -30,6 +30,7 @@
 #include "air_samplepos.h"
 #include "air_tessellation.h"
 
+#include "airconv_metal_target.hpp"
 #include "transforms/lower_16bit_texread.hpp"
 #include "transforms/simdgroup_implicit_membarrier.hpp"
 
@@ -39,16 +40,17 @@ namespace dxmt {
 
 void initializeModule(llvm::Module &M) {
   M.setSourceFileName("airconv_generated.metal");
-  // Baseline; setup_metal_version() raises this along with the AIR version once
-  // the caller's Metal version is known.
-  M.setTargetTriple("air64-apple-macosx13.0.0");
+  // Baseline for the platform we were built for; setup_metal_version() raises
+  // the version along with the AIR version once the caller's is known.
+  auto baseline = GetMetalTarget(SM50_SHADER_METAL_300);
+  M.setTargetTriple(baseline.triple);
   M.setDataLayout(
     "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:"
     "64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-"
     "v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:"
     "16:32"
   );
-  M.setSDKVersion(VersionTuple(13, 0));
+  M.setSDKVersion(VersionTuple(baseline.os_major, baseline.os_minor));
   M.addModuleFlag(Module::ModFlagBehavior::Error, "wchar_size", 4);
   M.addModuleFlag(Module::ModFlagBehavior::Max, "frame-pointer", 2);
   M.addModuleFlag(Module::ModFlagBehavior::Max, "air.max_device_buffers", 31);

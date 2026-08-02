@@ -2,6 +2,7 @@
 #include "config/config.hpp"
 #include "dxmt_command_queue.hpp"
 #include "Metal.hpp"
+#include <TargetConditionals.h>
 
 namespace dxmt {
 
@@ -25,7 +26,7 @@ public:
   };
 
   DeviceImpl(const DEVICE_DESC &desc) : device_(desc.device), cmd_queue_(device_) {
-    uint64_t macos_major_version = 0, macos_minor_version = 0;
+    uint64_t os_major_version = 0, os_minor_version = 0;
     int version_conf = Config::getInstance().getOption<int>("dxmt.shaderMetalVersion", 0);
     switch (version_conf) {
     case WMTMetal300:
@@ -37,10 +38,20 @@ public:
       metal_version_ = WMTMetalVersionMax;
       break;
     }
-    WMTGetOSVersion(&macos_major_version, &macos_minor_version, nullptr);
-    if (macos_major_version >= 15) {
+    WMTGetOSVersion(&os_major_version, &os_minor_version, nullptr);
+    /* Which OS release brought which Metal version differs per platform, and
+     * WMTGetOSVersion reports whichever OS we are actually running on. */
+#if TARGET_OS_OSX
+    const uint64_t v310 = 14, v320 = 15;
+#elif TARGET_OS_VISION
+    /* visionOS is Metal 3.1 from 1.0 on -- it has no 3.0. */
+    const uint64_t v310 = 0, v320 = 2;
+#else /* iOS, tvOS */
+    const uint64_t v310 = 17, v320 = 18;
+#endif
+    if (os_major_version >= v320) {
       metal_version_ = std::min(WMTMetal320, metal_version_);
-    } else if (macos_major_version >= 14) {
+    } else if (os_major_version >= v310) {
       metal_version_ = std::min(WMTMetal310, metal_version_);
     } else {
       metal_version_ = std::min(WMTMetal300, metal_version_);
@@ -52,7 +63,7 @@ public:
       metal_version_ = std::min(WMTMetal310, metal_version_);
       max_object_threadgroups_ = 1024;
       // macOS 26 bug: setShouldMaximizeConcurrentCompilation crashes on AMDGPU
-      if (!(macos_major_version >= 16 && macos_major_version <= 26 && macos_minor_version < 2))
+      if (!(os_major_version >= 16 && os_major_version <= 26 && os_minor_version < 2))
         device_.setShouldMaximizeConcurrentCompilation(true);
     } else {
       max_object_threadgroups_ = -1ull;

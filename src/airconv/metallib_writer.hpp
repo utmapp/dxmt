@@ -25,7 +25,13 @@ enum class MTLBFourCC : uint32_t {
 
 const uint32_t MTLB_Magic = MTLB_FOURCC('M', 'T', 'L', 'B');
 
-enum class Platform : uint16_t { MTLBPlatform_macOS = 0x8001 };
+/* Values as emitted by Apple's metal/metallib tools per -sdk; the runtime
+ * loader rejects a container whose platform does not match the OS with
+ * "This library format is not supported on this platform". */
+enum class Platform : uint16_t {
+  MTLBPlatform_macOS = 0x8001,
+  MTLBPlatform_Embedded = 0x0001, /* every non-mac platform, simulators included */
+};
 
 enum class FileType : uint8_t {
   MTLBType_Executable = 0x00,
@@ -33,6 +39,12 @@ enum class FileType : uint8_t {
 
 enum class OS : uint8_t {
   MTLBOS_macOS = 0x81,
+  MTLBOS_iOS = 0x82,
+  MTLBOS_tvOS = 0x83,
+  MTLBOS_iOSSimulator = 0x87,
+  MTLBOS_tvOSSimulator = 0x88,
+  MTLBOS_visionOS = 0x8b,
+  MTLBOS_visionOSSimulator = 0x8c,
 };
 
 typedef struct __attribute__((packed)) {
@@ -117,7 +129,9 @@ static_assert(sizeof(MTLB_VATY) == 2, "");
 class MetallibWriter {
 
 public:
-  void Write(const llvm::Module &module, llvm::raw_ostream &OS);
+  /* Downgrades the module's attributes in place before serializing: the AIR
+   * bitcode readers in older OSes predate several LLVM attributes. */
+  void Write(llvm::Module &module, llvm::raw_ostream &OS);
 };
 
 } // namespace dxmt::metallib

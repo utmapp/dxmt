@@ -1,13 +1,44 @@
 #include <stdatomic.h>
 #include <dlfcn.h>
+#include <TargetConditionals.h>
+/*
+ * Only macOS runs the Wine variant and drives a window.  The other Apple
+ * platforms build the headless -native variant -- no swapchains, monitors or
+ * adapters -- so everything resting on AppKit or the CoreGraphics display list
+ * is compiled out below.  The unix call slots stay: both thunk tables are
+ * indexed by ordinal, so a removed entry would shift every one after it.
+ */
+#if TARGET_OS_OSX
 #import <Cocoa/Cocoa.h>
+#else
+#import <Foundation/Foundation.h>
+#endif
 #import <ColorSync/ColorSync.h>
 #import <CoreFoundation/CFRunLoop.h>
 #import <Metal/Metal.h>
+/* No simulator SDK ships MetalFX at all, and visionOS has the spatial scaler
+ * but not the temporal one.  A device that reports neither as supported never
+ * reaches the encode paths. */
+#if defined(TARGET_OS_SIMULATOR) && TARGET_OS_SIMULATOR
+#define DXMT_HAS_METALFX 0
+#define DXMT_HAS_METALFX_TEMPORAL 0
+#elif TARGET_OS_VISION
+#define DXMT_HAS_METALFX 1
+#define DXMT_HAS_METALFX_TEMPORAL 0
+#else
+#define DXMT_HAS_METALFX 1
+#define DXMT_HAS_METALFX_TEMPORAL 1
+#endif
+#if DXMT_HAS_METALFX
 #import <MetalFX/MetalFX.h>
+#endif
 #import <QuartzCore/QuartzCore.h>
-#include "objc/objc-runtime.h"
+/* objc-runtime.h is a macOS-only umbrella over these two. */
+#include "objc/message.h"
+#include "objc/runtime.h"
+#if TARGET_OS_OSX
 #include <bootstrap.h>
+#endif
 #include <mach/mach_port.h>
 #include <sys/mman.h>
 #define WINEMETAL_API
@@ -56,7 +87,17 @@ _NSArray_count(void *obj) {
 static NTSTATUS
 _MTLCopyAllDevices(void *obj) {
   struct unixcall_generic_obj_ret *params = obj;
+#if TARGET_OS_OSX
   params->ret = (obj_handle_t)MTLCopyAllDevices();
+#else
+  /* MTLCopyAllDevices only reached the other platforms in the 18.0-era SDKs
+   * (and the frameworks are weak-linked, so calling it earlier jumps to NULL).
+   * There is exactly one GPU; hand back the same one-element array it would
+   * have returned. */
+  id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+  params->ret = (obj_handle_t)(device ? [[NSArray alloc] initWithObjects:&device count:1] : [NSArray new]);
+  [device release];
+#endif
   return STATUS_SUCCESS;
 }
 
@@ -153,6 +194,23 @@ _MTLCommandBuffer_encodeSignalEvent(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/*
+ * WMTResourceOptions is numerically MTLResourceOptions, so this is a cast --
+ * except for the managed storage mode, which only macOS has.  Everywhere else
+ * memory is unified, and shared is what managed degenerates to: same CPU
+ * visibility, no explicit didModifyRange: flush.
+ */
+static MTLResourceOptions
+to_metal_resource_options(uint64_t options) {
+#if !TARGET_OS_OSX
+  /* Spelled with the WMT constants: MTLResourceStorageModeManaged is itself
+   * API_UNAVAILABLE(ios) and cannot be named here. */
+  if ((options & MTLResourceStorageModeMask) == WMTResourceStorageModeManaged)
+    options = (options & ~(uint64_t)MTLResourceStorageModeMask) | WMTResourceStorageModeShared;
+#endif
+  return (MTLResourceOptions)options;
+}
+
 static NTSTATUS
 _MTLDevice_newBuffer(void *obj) {
   struct unixcall_mtldevice_newbuffer *params = obj;
@@ -162,10 +220,10 @@ _MTLDevice_newBuffer(void *obj) {
   if (info->memory.ptr) {
     buffer = [device newBufferWithBytesNoCopy:info->memory.ptr
                                        length:info->length
-                                      options:(enum MTLResourceOptions)info->options
+                                      options:to_metal_resource_options(info->options)
                                   deallocator:NULL];
   } else {
-    buffer = [device newBufferWithLength:info->length options:(enum MTLResourceOptions)info->options];
+    buffer = [device newBufferWithLength:info->length options:to_metal_resource_options(info->options)];
     info->memory.ptr = [buffer storageMode] == MTLStorageModePrivate ? NULL : [buffer contents];
   }
   params->ret = (obj_handle_t)buffer;
@@ -186,7 +244,7 @@ _MTLDevice_newBufferMapped(void *obj) {
   uint64_t length = info->length;
   id<MTLBuffer> buffer = [device newBufferWithBytesNoCopy:memory
                                                    length:length
-                                                  options:(enum MTLResourceOptions)info->options
+                                                  options:to_metal_resource_options(info->options)
                                               deallocator:^(void *ptr, NSUInteger len) {
                                                 munmap(ptr, len);
                                               }];
@@ -276,7 +334,7 @@ fill_texture_descriptor(MTLTextureDescriptor *desc, struct WMTTextureInfo *info)
   desc.mipmapLevelCount = info->mipmap_level_count;
   desc.sampleCount = info->sample_count;
   desc.usage = (MTLTextureUsage)info->usage;
-  desc.resourceOptions = (MTLResourceOptions)info->options;
+  desc.resourceOptions = to_metal_resource_options(info->options);
 };
 
 void
@@ -1269,7 +1327,11 @@ _MTLTexture_replaceRegion(void *obj) {
 static NTSTATUS
 _MTLBuffer_didModifyRange(void *obj) {
   struct unixcall_generic_obj_uint64_uint64_ret *params = obj;
+#if TARGET_OS_OSX
   [(id<MTLBuffer>)params->handle didModifyRange:NSMakeRange(params->arg, params->ret)];
+#else
+  (void)params; /* no managed storage off macOS, so nothing to flush */
+#endif
   return STATUS_SUCCESS;
 }
 
@@ -1298,7 +1360,17 @@ _MTLDevice_supportsFamily(void *obj) {
 static NTSTATUS
 _MTLDevice_supportsBCTextureCompression(void *obj) {
   struct unixcall_generic_obj_uint64_ret *params = obj;
+#if TARGET_OS_OSX
   params->ret = [(id<MTLDevice>)params->handle supportsBCTextureCompression];
+#else
+  /* The property only reached the other platforms in 16.4; the accessor is not
+   * there to call before that, and neither is the hardware support it would
+   * report. */
+  if (@available(ios 16.4, tvos 16.4, visionos 1.0, *))
+    params->ret = [(id<MTLDevice>)params->handle supportsBCTextureCompression];
+  else
+    params->ret = false;
+#endif
   return STATUS_SUCCESS;
 }
 
@@ -1392,6 +1464,7 @@ static const int SIGNALS[] = {
 
 static NTSTATUS
 _MTLDevice_newTemporalScaler(void *obj) {
+#if DXMT_HAS_METALFX_TEMPORAL
   struct unixcall_mtldevice_newfxtemporalscaler *params = obj;
   MTLFXTemporalScalerDescriptor *desc = [[MTLFXTemporalScalerDescriptor alloc] init];
   const struct WMTFXTemporalScalerInfo *info = params->info.ptr;
@@ -1431,10 +1504,16 @@ _MTLDevice_newTemporalScaler(void *obj) {
 
   [desc release];
   return STATUS_SUCCESS;
+#else
+  struct unixcall_mtldevice_newfxtemporalscaler *params = obj;
+  params->ret = 0;
+  return STATUS_SUCCESS;
+#endif
 }
 
 static NTSTATUS
 _MTLDevice_newSpatialScaler(void *obj) {
+#if DXMT_HAS_METALFX
   struct unixcall_mtldevice_newfxspatialscaler *params = obj;
   MTLFXSpatialScalerDescriptor *desc = [[MTLFXSpatialScalerDescriptor alloc] init];
   const struct WMTFXSpatialScalerInfo *info = params->info.ptr;
@@ -1447,10 +1526,16 @@ _MTLDevice_newSpatialScaler(void *obj) {
   params->ret = (obj_handle_t)[desc newSpatialScalerWithDevice:(id<MTLDevice>)params->device];
   [desc release];
   return STATUS_SUCCESS;
+#else
+  struct unixcall_mtldevice_newfxspatialscaler *params = obj;
+  params->ret = 0;
+  return STATUS_SUCCESS;
+#endif
 }
 
 static NTSTATUS
 _MTLCommandBuffer_encodeTemporalScale(void *obj) {
+#if DXMT_HAS_METALFX_TEMPORAL
   struct unixcall_mtlcommandbuffer_temporal_scale *params = obj;
   id<MTLCommandBuffer> cmdbuf = (id<MTLCommandBuffer>)params->cmdbuf;
   id<MTLFXTemporalScaler> scaler = (id<MTLFXTemporalScaler>)params->scaler;
@@ -1472,10 +1557,15 @@ _MTLCommandBuffer_encodeTemporalScale(void *obj) {
   scaler.preExposure = props->pre_exposure;
   [scaler encodeToCommandBuffer:cmdbuf];
   return STATUS_SUCCESS;
+#else
+  (void)obj; /* no temporal scaler was ever created */
+  return STATUS_SUCCESS;
+#endif
 }
 
 static NTSTATUS
 _MTLCommandBuffer_encodeSpatialScale(void *obj) {
+#if DXMT_HAS_METALFX
   struct unixcall_mtlcommandbuffer_spatial_scale *params = obj;
   id<MTLCommandBuffer> cmdbuf = (id<MTLCommandBuffer>)params->cmdbuf;
   id<MTLFXSpatialScaler> scaler = (id<MTLFXSpatialScaler>)params->scaler;
@@ -1484,6 +1574,10 @@ _MTLCommandBuffer_encodeSpatialScale(void *obj) {
   scaler.fence = (id<MTLFence>)params->fence;
   [scaler encodeToCommandBuffer:cmdbuf];
   return STATUS_SUCCESS;
+#else
+  (void)obj; /* no spatial scaler was ever created */
+  return STATUS_SUCCESS;
+#endif
 }
 
 static NTSTATUS
@@ -1549,16 +1643,28 @@ _MetalLayer_nextDrawable(void *obj) {
 
 static NTSTATUS
 _MTLDevice_supportsFXSpatialScaler(void *obj) {
+#if DXMT_HAS_METALFX
   struct unixcall_generic_obj_uint64_ret *params = obj;
   params->ret = [MTLFXSpatialScalerDescriptor supportsDevice:(id<MTLDevice>)params->handle];
   return STATUS_SUCCESS;
+#else
+  struct unixcall_generic_obj_uint64_ret *params = obj;
+  params->ret = false;
+  return STATUS_SUCCESS;
+#endif
 }
 
 static NTSTATUS
 _MTLDevice_supportsFXTemporalScaler(void *obj) {
+#if DXMT_HAS_METALFX_TEMPORAL
   struct unixcall_generic_obj_uint64_ret *params = obj;
   params->ret = [MTLFXTemporalScalerDescriptor supportsDevice:(id<MTLDevice>)params->handle];
   return STATUS_SUCCESS;
+#else
+  struct unixcall_generic_obj_uint64_ret *params = obj;
+  params->ret = false;
+  return STATUS_SUCCESS;
+#endif
 }
 
 static NTSTATUS
@@ -1571,7 +1677,9 @@ _MetalLayer_setProps(void *obj) {
     layer.opaque = props->opaque;
     layer.framebufferOnly = props->framebuffer_only;
     layer.contentsScale = props->contents_scale;
+#if TARGET_OS_OSX
     layer.displaySyncEnabled = props->display_sync_enabled;
+#endif
     layer.drawableSize = CGSizeMake(props->drawable_width, props->drawable_height);
     layer.pixelFormat = to_metal_pixel_format(props->pixel_format);
   });
@@ -1587,7 +1695,11 @@ _MetalLayer_getProps(void *obj) {
   props->opaque = layer.opaque;
   props->framebuffer_only = layer.framebufferOnly;
   props->contents_scale = layer.contentsScale;
+#if TARGET_OS_OSX
   props->display_sync_enabled = layer.displaySyncEnabled;
+#else
+  props->display_sync_enabled = true; /* always on where it cannot be turned off */
+#endif
   props->drawable_height = layer.drawableSize.height;
   props->drawable_width = layer.drawableSize.width;
   props->pixel_format = layer.pixelFormat;
@@ -1800,6 +1912,8 @@ _MTLDevice_setShouldMaximizeConcurrentCompilation(void *args) {
   if (@available(macOS 13.3, *)) {
     [(id<MTLDevice>)params->handle setShouldMaximizeConcurrentCompilation:(BOOL)params->arg];
   }
+#else
+  (void)params; /* macOS-only hint */
 #endif
   return STATUS_SUCCESS;
 }
@@ -2217,7 +2331,9 @@ _MetalLayer_setColorSpace(void *obj) {
     return STATUS_SUCCESS;
   execute_on_main(^{
     layer.colorspace = ref;
+#if !TARGET_OS_TV /* tvOS has no opt-in: the layer is EDR-capable or it is not */
     layer.wantsExtendedDynamicRangeContent = WMT_COLORSPACE_IS_HDR(colorspace);
+#endif
     CGColorSpaceRelease(ref);
   });
   params->ret = true;
@@ -2227,13 +2343,21 @@ _MetalLayer_setColorSpace(void *obj) {
 static NTSTATUS
 _WMTGetPrimaryDisplayId(void *obj) {
   struct unixcall_generic_obj_ret *params = obj;
+#if TARGET_OS_OSX
   params->ret = CGMainDisplayID();
+#else
+  params->ret = 0; /* headless: no displays to enumerate */
+#endif
   return STATUS_SUCCESS;
 }
 
 static NTSTATUS
 _WMTGetSecondaryDisplayId(void *obj) {
   struct unixcall_generic_obj_ret *params = obj;
+#if !TARGET_OS_OSX
+  params->ret = 0;
+  return STATUS_SUCCESS;
+#else
   params->ret = kCGNullDirectDisplay;
 
   uint32_t count = 0;
@@ -2257,6 +2381,7 @@ _WMTGetSecondaryDisplayId(void *obj) {
   }
 
   return STATUS_SUCCESS;
+#endif
 }
 
 typedef struct icc_XYZ_t {
@@ -2301,6 +2426,7 @@ GetDisplayColorGamut(ColorSyncProfileRef profile, struct WMTDisplayDescription *
          );
 }
 
+#if TARGET_OS_OSX
 NSScreen *
 GetNSScreenForDisplayID(CGDirectDisplayID display_id) {
   for (NSScreen *screen in [NSScreen screens]) {
@@ -2311,12 +2437,20 @@ GetNSScreenForDisplayID(CGDirectDisplayID display_id) {
   }
   return nil;
 }
+#endif
 
 static NTSTATUS
 _WMTGetDisplayDescription(void *obj) {
   struct unixcall_generic_obj_ptr_noret *params = obj;
-  CGDirectDisplayID display_id = params->handle;
   struct WMTDisplayDescription *desc_out = params->arg.ptr;
+#if !TARGET_OS_OSX
+  /* No display to describe, so report the generic profile and SDR. */
+  GetDisplayColorGamut(ColorSyncProfileCreateWithName(kColorSyncGenericRGBProfile), desc_out);
+  desc_out->maximum_edr_color_component_value = 1.0;
+  desc_out->maximum_reference_edr_color_component_value = 0.0;
+  desc_out->maximum_potential_edr_color_component_value = 1.0;
+#else
+  CGDirectDisplayID display_id = params->handle;
   ColorSyncProfileRef profile = ColorSyncProfileCreateWithDisplayID(display_id);
   if (!profile || !GetDisplayColorGamut(profile, desc_out))
     GetDisplayColorGamut(ColorSyncProfileCreateWithName(kColorSyncGenericRGBProfile), desc_out);
@@ -2332,6 +2466,7 @@ _WMTGetDisplayDescription(void *obj) {
     desc_out->maximum_reference_edr_color_component_value = 0.0;
     desc_out->maximum_potential_edr_color_component_value = 1.0;
   }
+#endif
   return STATUS_SUCCESS;
 }
 
@@ -2351,6 +2486,10 @@ _MetalLayer_getEDRValue(void *obj) {
   value->maximum_edr_color_component_value = 1.0;
   value->maximum_potential_edr_color_component_value = 1.0;
 
+#if !TARGET_OS_OSX
+  (void)layer; /* headless: SDR, as initialised above */
+  return STATUS_SUCCESS;
+#else
   if (![layer.delegate isKindOfClass:NSView.class])
     return STATUS_SUCCESS;
 
@@ -2368,6 +2507,7 @@ _MetalLayer_getEDRValue(void *obj) {
   value->maximum_potential_edr_color_component_value = screen.maximumPotentialExtendedDynamicRangeColorComponentValue;
 
   return STATUS_SUCCESS;
+#endif
 }
 
 static NTSTATUS
@@ -2391,9 +2531,13 @@ _MTLLibrary_newFunctionWithConstants(void *obj) {
 static NTSTATUS
 _WMTQueryDisplaySetting(void *obj) {
   struct unixcall_query_display_setting *params = obj;
-  CGDirectDisplayID display_id = params->display_id;
   struct WMTHDRMetadata *value = params->hdr_metadata.ptr;
   params->ret = false;
+#if !TARGET_OS_OSX
+  (void)value; /* headless: nothing ever recorded a setting */
+  return STATUS_SUCCESS;
+#else
+  CGDirectDisplayID display_id = params->display_id;
   struct DisplaySetting *setting = &g_display_settings[display_id == CGMainDisplayID()];
   if (setting->version) {
     *value = setting->hdr_metadata;
@@ -2401,11 +2545,16 @@ _WMTQueryDisplaySetting(void *obj) {
     params->ret = true;
   }
   return STATUS_SUCCESS;
+#endif
 }
 
 static NTSTATUS
 _WMTUpdateDisplaySetting(void *obj) {
   struct unixcall_update_display_setting *params = obj;
+#if !TARGET_OS_OSX
+  (void)params; /* headless: no display to configure */
+  return STATUS_SUCCESS;
+#else
   CGDirectDisplayID display_id = params->display_id;
   const struct WMTHDRMetadata *value = params->hdr_metadata.ptr;
   struct DisplaySetting *setting = &g_display_settings[display_id == CGMainDisplayID()];
@@ -2417,6 +2566,7 @@ _WMTUpdateDisplaySetting(void *obj) {
     setting->version = 0;
   }
   return STATUS_SUCCESS;
+#endif
 }
 
 static NTSTATUS
@@ -2426,6 +2576,11 @@ _WMTQueryDisplaySettingForLayer(void *obj) {
   struct WMTHDRMetadata *hdr_metadata_out = params->hdr_metadata.ptr;
 
   params->version = 0;
+#if !TARGET_OS_OSX
+  (void)layer;
+  (void)hdr_metadata_out; /* headless: version 0 means "no setting" */
+  return STATUS_SUCCESS;
+#else
   if (![layer.delegate isKindOfClass:NSView.class])
     return STATUS_SUCCESS;
 
@@ -2449,6 +2604,7 @@ _WMTQueryDisplaySettingForLayer(void *obj) {
       screen.maximumPotentialExtendedDynamicRangeColorComponentValue;
 
   return STATUS_SUCCESS;
+#endif
 }
 
 static NTSTATUS
@@ -2605,8 +2761,10 @@ static NTSTATUS
 _MTLBuffer_updateContents(void *obj) {
   struct unixcall_mtlbuffer_updatecontents *params = obj;
   memcpy((void *)((char *)[(id<MTLBuffer>)params->buffer contents] + params->offset), params->data.ptr, params->length);
+#if TARGET_OS_OSX
   if ([(id<MTLBuffer>)params->buffer storageMode] == MTLStorageModeManaged)
     [(id<MTLBuffer>)params->buffer didModifyRange:NSMakeRange(params->offset, params->length)];
+#endif
   return STATUS_SUCCESS;
 }
 
@@ -2662,15 +2820,28 @@ _DispatchData_alloc_init(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* No simulator SDK declares MTLSharedTextureHandle -- cross-process texture
+ * sharing does not exist there. */
+#if defined(TARGET_OS_SIMULATOR) && TARGET_OS_SIMULATOR
+#define DXMT_HAS_SHARED_TEXTURE 0
+#else
+#define DXMT_HAS_SHARED_TEXTURE 1
+
 @interface MTLSharedTextureHandle ()
 
 - (MTLSharedTextureHandle *)initWithMachPort:(mach_port_t)port;
 - (mach_port_t)createMachPort;
 
 @end
+#endif
 
 static NTSTATUS
 _MTLDevice_newSharedTexture(void *obj) {
+#if !DXMT_HAS_SHARED_TEXTURE
+  struct unixcall_mtldevice_newtexture *params = obj;
+  params->ret = 0;
+  return STATUS_SUCCESS;
+#else
   struct unixcall_mtldevice_newtexture *params = obj;
   id<MTLDevice> device = (id<MTLDevice>)params->device;
   struct WMTTextureInfo *info = params->info.ptr;
@@ -2695,13 +2866,22 @@ _MTLDevice_newSharedTexture(void *obj) {
   }
 
   return STATUS_SUCCESS;
+#endif
 }
 
+/* The bootstrap server is macOS-only: <bootstrap.h> is in no other SDK, and the
+ * name namespace is unreachable from a sandboxed app anyway. */
+#if TARGET_OS_OSX
 /* Private API to register a mach port with the bootstrap server */
 extern kern_return_t bootstrap_register2(mach_port_t bp, name_t service_name, mach_port_t sp, int flags);
+#endif
 
 static NTSTATUS
 _WMTBootstrapRegister(void *obj) {
+#if !TARGET_OS_OSX
+  (void)obj;
+  return STATUS_UNSUCCESSFUL;
+#else
   struct unixcall_bootstrap *params = obj;
   mach_port_t rp = params->mach_port;
   mach_port_t bp;
@@ -2711,10 +2891,15 @@ _WMTBootstrapRegister(void *obj) {
   NTSTATUS ret = bootstrap_register2(bp, params->name, rp, 0) != KERN_SUCCESS ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS;
   mach_port_deallocate(mach_task_self(), bp);
   return ret;
+#endif
 }
 
 static NTSTATUS
 _WMTBootstrapLookUp(void *obj) {
+#if !TARGET_OS_OSX
+  (void)obj;
+  return STATUS_UNSUCCESSFUL;
+#else
   struct unixcall_bootstrap *params = obj;
   mach_port_t rp = 0;
   mach_port_t bp;
@@ -2725,6 +2910,7 @@ _WMTBootstrapLookUp(void *obj) {
   mach_port_deallocate(mach_task_self(), bp);
   params->mach_port = rp;
   return ret;
+#endif
 }
 
 @protocol MTLDeviceSPI <MTLDevice>
@@ -2970,6 +3156,8 @@ _MTLCommandQueue_addResidencySet(void *obj) {
     id<MTLResidencySet> set = (id<MTLResidencySet>)params->arg;
     [queue addResidencySet:set];
   }
+#else
+  (void)params; /* residency sets never created here (newResidencySet returns 0) */
 #endif
   return STATUS_SUCCESS;
 }

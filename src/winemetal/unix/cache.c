@@ -22,14 +22,21 @@
 static inline NSString *
 resolve_cache_dir(NSString *path, bool path_is_file) {
   if (![path hasPrefix:@"/"]) {
+    NSString *base = nil;
     char buf[PATH_MAX];
     size_t len = confstr(_CS_DARWIN_USER_CACHE_DIR, buf, sizeof(buf));
 
-    if (!len) {
-      return nil;
+    if (len) {
+      base = [NSString stringWithUTF8String:buf];
+    } else {
+      /* An app sandbox can deny the dirhelper lookup behind confstr (seen on
+       * iOS); the container's Caches directory is the same place asked
+       * differently. */
+      NSArray<NSString *> *dirs = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
+      if (!dirs.count)
+        return nil;
+      base = dirs.firstObject;
     }
-
-    NSString *base = [NSString stringWithUTF8String:buf];
     path = [base stringByAppendingPathComponent:path];
   }
   [[NSFileManager defaultManager] createDirectoryAtPath:path_is_file ? [path stringByDeletingLastPathComponent] : path
@@ -103,7 +110,7 @@ resolve_cache_dir(NSString *path, bool path_is_file) {
   if ((self = [super init])) {
     NSString *dbPath = resolve_cache_dir(path, true);
     if (!dbPath) {
-      NSLog(@"[CacheReader] Failed to resolve cache path");
+      NSLog(@"[CacheWriter] Failed to resolve cache path");
       return nil;
     }
 

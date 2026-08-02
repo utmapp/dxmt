@@ -94,6 +94,33 @@ meson setup -Dnative_llvm_path=</path/to/llvm> --buildtype release
 meson compile -C build
 ```
 
+#### Other Apple platforms
+
+The native build also targets iOS, tvOS and visionOS, plus their simulators.
+Those are **headless**: no swapchains, no monitors, no adapters, so everything
+resting on AppKit or the CoreGraphics display list is compiled out. watchOS is
+not a target -- it ships no Metal framework.
+
+The platform comes from meson's [`host_machine.subsystem()`][subsystem], so the
+cross file has to declare it:
+
+```ini
+[host_machine]
+system = 'darwin'
+subsystem = 'ios'   # macos | ios | ios-simulator | tvos | tvos-simulator
+                    # | visionos | visionos-simulator
+```
+
+**A cross file that leaves `subsystem` out fails to configure** with
+`ERROR: Subsystem not defined or could not be autodetected` -- meson only
+auto-detects it for native builds, where it comes out as `macos`. This applies
+to macOS cross files too, which used to work without it.
+
+LLVM has to be built for the target platform, the same as for any other cross
+build; the `airconv` command line tool is only built where it can be run.
+
+[subsystem]: https://mesonbuild.com/Reference-tables.html#subsystem-names-since-120
+
 #### Side notes on building x86_64 target from arm64 device/environment
 
 Apparently the simplist solution is to use a x86_64 shell, but you can also set following environment variables

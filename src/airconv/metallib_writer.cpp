@@ -1,6 +1,12 @@
 #include "metallib_writer.hpp"
 #include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/InstrTypes.h"
+
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 
 using namespace llvm;
 
@@ -17,7 +23,28 @@ struct InputAttribute {
   // TODO: extend patch/control point here
 };
 
-void MetallibWriter::Write(const llvm::Module &module, raw_ostream &OS) {
+/* Second integer of a metadata tuple like !{i32 2, i32 6, i32 0}. */
+static bool
+get_version_pair(const llvm::Module &module, StringRef md_name, uint16_t ops[2], unsigned first_op) {
+  auto named = module.getNamedMetadata(md_name);
+  if (!named || !named->getNumOperands())
+    return false;
+  auto tuple = named->getOperand(0);
+  if (tuple->getNumOperands() < first_op + 2)
+    return false;
+  for (unsigned i = 0; i < 2; i++) {
+    auto cam = dyn_cast<ConstantAsMetadata>(tuple->getOperand(first_op + i).get());
+    if (!cam)
+      return false;
+    auto ci = dyn_cast<ConstantInt>(cam->getValue());
+    if (!ci)
+      return false;
+    ops[i] = (uint16_t)ci->getZExtValue();
+  }
+  return true;
+}
+
+void MetallibWriter::Write(llvm::Module &module, raw_ostream &OS) {
 
   SmallVector<char, 0> bitcode;
   SmallVector<char, 0> public_metadata;
@@ -26,11 +53,51 @@ void MetallibWriter::Write(const llvm::Module &module, raw_ostream &OS) {
 
   uint32_t fn_count = 0;
 
+  /* The optimization pipeline infers attributes the AIR bitcode readers in
+   * older OSes predate; an unknown attribute is a fatal "LLVM ERROR: Unknown
+   * attribute kind" inside MTLCompilerService (observed on iOS 16.3, whose
+   * reader also predates macOS 14's).  Apple's own tools strip these on
+   * serialization -- a metallib built with -sdk iphoneos keeps only the
+   * LLVM-8-era set -- so do the same.  Hints only, no semantic loss. */
+  AttributeMask incompatible;
+  incompatible.addAttribute(Attribute::MustProgress);
+  incompatible.addAttribute(Attribute::NoFree);
+  incompatible.addAttribute(Attribute::NoSync);
+  incompatible.addAttribute(Attribute::WillReturn);
+  incompatible.addAttribute(Attribute::NoUndef);
+  incompatible.addAttribute(Attribute::NoCallback);
+  for (auto &F : module) {
+    F.removeFnAttrs(incompatible);
+    F.removeRetAttrs(incompatible);
+    for (unsigned i = 0; i < F.arg_size(); i++)
+      F.removeParamAttrs(i, incompatible);
+    for (auto &BB : F)
+      for (auto &I : BB)
+        if (auto *CB = dyn_cast<CallBase>(&I)) {
+          CB->removeFnAttrs(incompatible);
+          CB->removeRetAttrs(incompatible);
+          for (unsigned i = 0; i < CB->arg_size(); i++)
+            CB->removeParamAttrs(i, incompatible);
+        }
+  }
+
   raw_svector_ostream bitcode_stream(bitcode);
   WriteBitcodeToFile(module, bitcode_stream, false, nullptr, true);
 
   auto hash =
     compute_sha256_hash((const uint8_t *)bitcode.data(), bitcode.size());
+
+  /* The VERS tags have to state what the bitcode actually is: the loader
+   * cross-checks them against the module's own air.version. */
+  MTLB_VERS_TAG vers{};
+  uint16_t pair[2];
+  vers.airVersionMajor = 2, vers.airVersionMinor = 6;
+  if (get_version_pair(module, "air.version", pair, 0))
+    vers.airVersionMajor = pair[0], vers.airVersionMinor = pair[1];
+  vers.languageVersionMajor = 3, vers.languageVersionMinor = 1;
+  /* air.language_version is !{!"Metal", major, minor, patch} */
+  if (get_version_pair(module, "air.language_version", pair, 1))
+    vers.languageVersionMajor = pair[0], vers.languageVersionMinor = pair[1];
 
   raw_svector_ostream public_metadata_stream(public_metadata);
   raw_svector_ostream private_metadata_stream(private_metadata);
@@ -60,12 +127,7 @@ void MetallibWriter::Write(const llvm::Module &module, raw_ostream &OS) {
           .PrivateMetadataOffset = private_metadata_stream.tell(),
           .BitcodeOffset = 0, // ??
         });
-        function_def_stream << value(MTLB_VERS_TAG{
-          .airVersionMajor = 2,
-          .airVersionMinor = 6,
-          .languageVersionMajor = 3,
-          .languageVersionMinor = 1,
-        });
+        function_def_stream << value(vers);
         while (fn->getNumOperands() > 3 && isa<MDTuple>(fn->getOperand(3).get())
         ) {
           auto maybe_patch_tuple = cast<MDTuple>(fn->getOperand(3).get());
@@ -179,12 +241,7 @@ void MetallibWriter::Write(const llvm::Module &module, raw_ostream &OS) {
           .PrivateMetadataOffset = private_metadata_stream.tell(),
           .BitcodeOffset = 0, // ??
         });
-        function_def_stream << value(MTLB_VERS_TAG{
-          .airVersionMajor = 2,
-          .airVersionMinor = 6,
-          .languageVersionMajor = 3,
-          .languageVersionMinor = 1,
-        });
+        function_def_stream << value(vers);
         function_def_stream << "ENDT";
         public_metadata_stream << value(4);
         public_metadata_stream << "ENDT";
@@ -213,12 +270,7 @@ void MetallibWriter::Write(const llvm::Module &module, raw_ostream &OS) {
           .PrivateMetadataOffset = private_metadata_stream.tell(),
           .BitcodeOffset = 0, // ??
         });
-        function_def_stream << value(MTLB_VERS_TAG{
-          .airVersionMajor = 2,
-          .airVersionMinor = 6,
-          .languageVersionMajor = 3,
-          .languageVersionMinor = 1,
-        });
+        function_def_stream << value(vers);
         function_def_stream << "ENDT";
 
         std::vector<InputAttribute> attributes;
@@ -307,12 +359,7 @@ void MetallibWriter::Write(const llvm::Module &module, raw_ostream &OS) {
           .PrivateMetadataOffset = private_metadata_stream.tell(),
           .BitcodeOffset = 0, // ??
         });
-        function_def_stream << value(MTLB_VERS_TAG{
-          .airVersionMajor = 2,
-          .airVersionMinor = 6,
-          .languageVersionMajor = 3,
-          .languageVersionMinor = 1,
-        });
+        function_def_stream << value(vers);
         function_def_stream << "ENDT";
 
         SmallVector<char, 0> fn_public_metadata;
@@ -348,12 +395,7 @@ void MetallibWriter::Write(const llvm::Module &module, raw_ostream &OS) {
           .PrivateMetadataOffset = private_metadata_stream.tell(),
           .BitcodeOffset = 0, // ??
         });
-        function_def_stream << value(MTLB_VERS_TAG{
-          .airVersionMajor = 2,
-          .airVersionMinor = 6,
-          .languageVersionMajor = 3,
-          .languageVersionMinor = 1,
-        });
+        function_def_stream << value(vers);
         function_def_stream << "ENDT";
 
         SmallVector<char, 0> fn_public_metadata;
@@ -391,12 +433,33 @@ void MetallibWriter::Write(const llvm::Module &module, raw_ostream &OS) {
   header.BitcodeSize = bitcode.size();
 
   header.Type = FileType::MTLBType_Executable; // executable
-  header.Platform = Platform::MTLBPlatform_macOS;
   header.VersionMajor = 2;
   header.VersionMinor = 7;
+  /* Like the AIR triple, the container names the platform it will be loaded
+   * on, so it follows the platform this library was built for (a Wine cross
+   * build has no TARGET_OS_* and falls through to macOS).  A mismatch is
+   * "This library format is not supported on this platform" at load. */
+#if defined(TARGET_OS_VISION) && TARGET_OS_VISION
+  header.Platform = Platform::MTLBPlatform_Embedded;
+  header.OS = TARGET_OS_SIMULATOR ? OS::MTLBOS_visionOSSimulator : OS::MTLBOS_visionOS;
+  header.OSVersionMajor = 1;
+  header.OSVersionMinor = 0;
+#elif defined(TARGET_OS_TV) && TARGET_OS_TV
+  header.Platform = Platform::MTLBPlatform_Embedded;
+  header.OS = TARGET_OS_SIMULATOR ? OS::MTLBOS_tvOSSimulator : OS::MTLBOS_tvOS;
+  header.OSVersionMajor = 16;
+  header.OSVersionMinor = 0;
+#elif defined(TARGET_OS_IOS) && TARGET_OS_IOS
+  header.Platform = Platform::MTLBPlatform_Embedded;
+  header.OS = TARGET_OS_SIMULATOR ? OS::MTLBOS_iOSSimulator : OS::MTLBOS_iOS;
+  header.OSVersionMajor = 16;
+  header.OSVersionMinor = 0;
+#else
+  header.Platform = Platform::MTLBPlatform_macOS;
   header.OS = OS::MTLBOS_macOS;
   header.OSVersionMajor = 14;
   header.OSVersionMinor = 4;
+#endif
 
   // write to stream
   OS << value(header);

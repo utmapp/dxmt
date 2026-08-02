@@ -10,8 +10,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/posix_shm.h>
 #include <sys/stat.h>
+#if __has_include(<sys/posix_shm.h>)
+#include <sys/posix_shm.h>
+#else
+/* Only macOS exposes the header; the kernel limit is the same everywhere. */
+#define PSHMNAMLEN 31
+#endif
 #include <unistd.h>
 
 /* An app group prefix must leave room for "/" and one nonce digit within

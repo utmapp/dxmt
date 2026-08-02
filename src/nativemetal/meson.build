@@ -8,11 +8,21 @@ winemetal_link_depends = []
 
 winemetal_ld_args = [
   '-weak_framework', 'CoreFoundation', '-weak_framework', 'Metal',
-  '-framework', 'MetalFX', '-weak_framework', 'Foundation',
+  '-weak_framework', 'Foundation',
   '-weak_framework', 'CoreGraphics', '-weak_framework', 'QuartzCore',
-  '-weak_framework', 'ColorSync',   '-weak_framework', 'Cocoa',
+  '-weak_framework', 'ColorSync',
   '-lsqlite3',
 ]
+
+if apple_subsystem == 'macos'
+  # AppKit, for the display and window queries the headless platforms compile out.
+  winemetal_ld_args += [ '-weak_framework', 'Cocoa' ]
+endif
+
+if not apple_platform.get('simulator', false)
+  # No simulator SDK ships MetalFX; the scalers are compiled out there.
+  winemetal_ld_args += [ '-framework', 'MetalFX' ]
+endif
 
 winemetal_lib = static_library('winemetal', winemetal_src,
   dependencies        : [ airconv_dep_darwin ],

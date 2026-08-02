@@ -41,10 +41,14 @@ airconv_dep_darwin = declare_dependency(
   link_args           : [ llvm_ld_flags_darwin, llvm_deps ] # meh
 )
 
-executable('airconv', airconv_src + airconv_cli_src,
-  include_directories : [ dxmt_include_path, llvm_include_path_darwin ],
-  cpp_args            : [ airconv_args ],
-  dependencies        : [ dxbc_parser_native_dep ],
-  link_args           : [ llvm_ld_flags_darwin, llvm_deps ],
-  native              : dxmt_crossbuild
-)
+# A developer tool, so it is only built where it can be run.  The headless
+# platforms cross-compile and could not launch it anyway.
+if dxmt_crossbuild or apple_subsystem == 'macos'
+  executable('airconv', airconv_src + airconv_cli_src,
+    include_directories : [ dxmt_include_path, llvm_include_path_darwin ],
+    cpp_args            : [ airconv_args ],
+    dependencies        : [ dxbc_parser_native_dep ],
+    link_args           : [ llvm_ld_flags_darwin, llvm_deps ],
+    native              : dxmt_crossbuild
+  )
+endif

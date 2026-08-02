@@ -112,16 +112,55 @@ else
   wrc_generator = generator(wrc, output : [ '@BASENAME@_ignored.h' ], arguments : [ '@OUTPUT@' ] )
 endif
 
+# Which Apple platform we are building for.  Note host_machine.subsystem() is
+# fatal when a cross file leaves it out -- it is only auto-detected for native
+# builds -- so every Apple cross file used with this project has to declare it.
+apple_subsystem = host_machine.system() == 'darwin' ? host_machine.subsystem() : ''
+
+# metal_sdk: the xcrun SDK the shader compiler runs against.
+# air_platform: the OS component of the AIR triple, which must match the SDK --
+#   an AIR module built for one platform will not load on another.
+# metal_min: lowest OS carrying everything we use (bindless argument buffers,
+#   mesh shaders, MetalFX).  visionOS is Metal 3.1 from 1.0, and the compiler
+#   clamps up to AIR 2.6 there whatever -std says.
+apple_platforms = {
+  'macos'              : { 'metal_sdk' : 'macosx',          'air_platform' : 'macos',           'metal_min' : '13.0' },
+  'ios'                : { 'metal_sdk' : 'iphoneos',        'air_platform' : 'ios',             'metal_min' : '16.0' },
+  'ios-simulator'      : { 'metal_sdk' : 'iphonesimulator', 'air_platform' : 'ios',             'metal_min' : '16.0', 'simulator' : true },
+  'tvos'               : { 'metal_sdk' : 'appletvos',       'air_platform' : 'tvos',            'metal_min' : '16.0' },
+  'tvos-simulator'     : { 'metal_sdk' : 'appletvsimulator','air_platform' : 'tvos',            'metal_min' : '16.0', 'simulator' : true },
+  'visionos'           : { 'metal_sdk' : 'xros',            'air_platform' : 'xros',            'metal_min' : '1.0'  },
+  'visionos-simulator' : { 'metal_sdk' : 'xrsimulator',     'air_platform' : 'xros',            'metal_min' : '1.0',  'simulator' : true },
+}
+
+if not dxmt_crossbuild
+  if apple_subsystem == 'watchos' or apple_subsystem == 'watchos-simulator'
+    error('watchOS ships no Metal framework, so DXMT cannot target it')
+  endif
+  if not apple_platforms.has_key(apple_subsystem)
+    error('unsupported Apple subsystem \'' + apple_subsystem + '\'')
+  endif
+  apple_platform = apple_platforms[apple_subsystem]
+  metal_sdk = apple_platform['metal_sdk']
+  # Simulator AIR is a distinct target from the device's, hence the suffix.
+  metal_air_target = '--target=air64-apple-' + apple_platform['air_platform'] + apple_platform['metal_min'] + (
+    apple_platform.get('simulator', false) ? '-simulator' : '')
+else
+  # Cross build: the shaders still have to run on the host's macOS.
+  metal_sdk = 'macosx'
+  metal_air_target = '--target=air64-apple-macos13.0'
+endif
+
 xcrun = find_program('xcrun')
 
 metalir_generator = generator(xcrun,
   output    : [ '@BASENAME@.air'],
-  arguments : [ '-sdk', 'macosx', 'metal', '-o', '@OUTPUT@', '-c', '@INPUT@', '@EXTRA_ARGS@'],
+  arguments : [ '-sdk', metal_sdk, 'metal', '-o', '@OUTPUT@', '-c', '@INPUT@', '@EXTRA_ARGS@'],
 )
 
 metallib_generator = generator(xcrun,
   output    : [ '@BASENAME@.metallib'],
-  arguments : [ '-sdk', 'macosx', 'metallib', '-o', '@OUTPUT@', '@INPUT@'],
+  arguments : [ '-sdk', metal_sdk, 'metallib', '-o', '@OUTPUT@', '@INPUT@'],
 )
 
 xxd = find_program('xxd')
