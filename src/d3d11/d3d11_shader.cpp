@@ -127,7 +127,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   if (variant.input_layout_handle)
     h.update(variant.input_layout_handle->sha1());
   auto variant_digest = h.final();
-  std::string func_name = "vs_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string();
+  std::string func_name = "vs_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string() + "_a" + std::to_string(AIRCONV_VERSION);
 
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
     SM50_SHADER_IA_INPUT_LAYOUT_DATA data_ia_layout;
@@ -175,7 +175,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   h.update(variant.dual_source_blending);
   h.update(variant.disable_depth_output);
   auto variant_digest = h.final();
-  std::string func_name = "ps_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string();
+  std::string func_name = "ps_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string() + "_a" + std::to_string(AIRCONV_VERSION);
 
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
     SM50_SHADER_PSO_PIXEL_SHADER_DATA data;
@@ -210,7 +210,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   Sha1HashState h;
   h.update(getGlobalShaderFlag());
   auto variant_digest = h.final();
-  std::string func_name = "cs_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string();
+  std::string func_name = "cs_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string() + "_a" + std::to_string(AIRCONV_VERSION);
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
     sm50_bitcode_t compile_result = nullptr;
     sm50_error_t sm50_err = nullptr;
@@ -238,7 +238,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   if (variant.input_layout_handle)
     h.update(variant.input_layout_handle->sha1());
   auto variant_digest = h.final();
-  std::string func_name = "vshs_" + shader->sha1().string().substr(0, 8) + "_" +  variant_digest.string();
+  std::string func_name = "vshs_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string() + "_a" + std::to_string(AIRCONV_VERSION);
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
     SM50_SHADER_IA_INPUT_LAYOUT_DATA ia_layout;
     SM50_SHADER_PSO_TESSELLATOR_DATA pso_tess;
@@ -285,7 +285,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   h.update(variant.rasterization_disabled);
   h.update(variant.max_potential_tess_factor);
   auto variant_digest = h.final();
-  std::string func_name = "ds_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string();
+  std::string func_name = "ds_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string() + "_a" + std::to_string(AIRCONV_VERSION);
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
     SM50_SHADER_GS_PASS_THROUGH_DATA gs_passthrough;
     SM50_SHADER_PSO_TESSELLATOR_DATA pso_tess;
@@ -322,7 +322,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   if (variant.input_layout_handle)
     h.update(variant.input_layout_handle->sha1());
   auto variant_digest = h.final();
-  std::string func_name = "vsso_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string();
+  std::string func_name = "vsso_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string() + "_a" + std::to_string(AIRCONV_VERSION);
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
     SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT_DATA data_so;
     SM50_SHADER_IA_INPUT_LAYOUT_DATA data_vertex_pulling;
@@ -374,7 +374,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   if (variant.input_layout_handle)
     h.update(variant.input_layout_handle->sha1());
   auto variant_digest = h.final();
-  std::string func_name = "vsgs_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string();
+  std::string func_name = "vsgs_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string() + "_a" + std::to_string(AIRCONV_VERSION);
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
     SM50_SHADER_IA_INPUT_LAYOUT_DATA ia_layout;
     ia_layout.index_buffer_format = variant.index_buffer_format;
@@ -421,7 +421,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   h.update(variant.vertex_shader_handle->sha1());
   h.update(variant.strip_topology);
   auto variant_digest = h.final();
-  std::string func_name = "gs_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string();
+  std::string func_name = "gs_" + shader->sha1().string().substr(0, 8) + "_" + variant_digest.string() + "_a" + std::to_string(AIRCONV_VERSION);
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
     SM50_SHADER_PSO_GEOMETRY_SHADER_DATA geometry;
     geometry.type = SM50_SHADER_PSO_GEOMETRY_SHADER;

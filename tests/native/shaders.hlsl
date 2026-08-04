@@ -67,3 +67,18 @@ void cs_main(uint3 dtid : SV_DispatchThreadID) {
   cs_out[dtid.x] = cs_in[dtid.x] * 3u + dtid.x;
   cs_counter.InterlockedAdd(0, dtid.x);
 }
+
+// ps_compat: DXBC patterns whose airconv translation used to emit constructs
+// pre-LLVM-8-era AIR bitcode readers reject (fneg/UNOP from negation, funnel
+// shift from the rotate idiom, min/max intrinsics from integer ternaries).
+// Values are exact so the test can pixel-check the lowered expansions.
+float4 ps_compat(VSOut input) : SV_Target {
+  // fneg survives folding when it feeds a call operand
+  float n = saturate(-(input.color.x * input.color.w));
+  uint u = (uint)(input.color.y * 200.0);    // 200 for color.y == 1
+  uint rot = (u << 3) | (u >> 29);           // rotate idiom -> llvm.fshl
+  int i1 = (int)(input.color.z * 100.0);     // 100 for color.z == 1
+  int i2 = 55;
+  int mx = i1 > i2 ? i1 : i2;                // ternary max -> llvm.smax
+  return float4(n + 0.5, (rot & 255u) / 255.0, mx / 255.0, 1.0);
+}

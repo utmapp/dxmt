@@ -460,6 +460,24 @@ test_draw_basic(Ctx &c) {
   emit("[CRC] %s.rt = 0x%08x", T, crc32_of(img.data(), img.size()));
 }
 
+/* ps_compat carries the DXBC patterns whose AIR translation used to emit
+ * constructs pre-LLVM-8-era bitcode readers reject (fneg/UNOP, funnel-shift
+ * intrinsics): on an affected OS (e.g. iOS 16.3) the un-lowered forms fail
+ * pipeline creation with AGX "Failed to materializeAll", and the lowered
+ * replacements must still compute the same pixels. */
+static void
+test_compat_shapes(Ctx &c) {
+  const char *T = "compat_shapes";
+  const UINT W = 64, H = 64;
+  auto img = draw_and_read(
+      c, W, H, kQuadFull, 6, dxbc_vs_pass, sizeof(dxbc_vs_pass), dxbc_ps_compat, sizeof(dxbc_ps_compat));
+  CHECK(T, img.size() == W * H * 4, return);
+  /* color=(1,1,1,1): r = saturate(-(1*1)) + 0.5 = 0.5 (half-ULP window),
+   * g = ((200<<3)|(200>>29)) & 255 = 64, b = max(100, 55) = 100 */
+  CHECK(T, px_eq(img, W, 32, 32, 128, 64, 100, 255, 1), log_px(img, W, 32, 32, "center"));
+  emit("[CRC] %s.rt = 0x%08x", T, crc32_of(img.data(), img.size()));
+}
+
 static void
 test_draw_deferred(Ctx &c) {
   const char *T = "draw_deferred";
@@ -1286,6 +1304,7 @@ main(int argc, char **argv) {
   test_buffer_roundtrip(c);
   test_texture_roundtrip(c);
   test_draw_basic(c);
+  test_compat_shapes(c);
   test_draw_deferred(c);
   test_draw_cbuffer(c);
   test_draw_textured(c);
