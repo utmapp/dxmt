@@ -92,6 +92,9 @@ enum MTL_DXGI_FORMAT_FLAG {
   MTL_DXGI_FORMAT_STENCIL_PLANER = 32,
   MTL_DXGI_FORMAT_EMULATED_D24 = 256,
   MTL_DXGI_FORMAT_EMULATED_LINEAR_DEPTH_STENCIL = 512,
+  /* device has no BC support: PixelFormat is the uncompressed stand-in,
+   * EmulatedBC the original BC format; uploads decompress on the CPU */
+  MTL_DXGI_FORMAT_EMULATED_BC = 1024,
 };
 
 struct MTL_DXGI_FORMAT_DESC {
@@ -102,6 +105,8 @@ struct MTL_DXGI_FORMAT_DESC {
     uint32_t BlockSize;
   };
   uint32_t Flag;
+  /* the BC format PixelFormat stands in for, when MTL_DXGI_FORMAT_EMULATED_BC */
+  WMTPixelFormat EmulatedBC;
 };
 
 int32_t MTLQueryDXGIFormat(WMT::Device device, uint32_t format, MTL_DXGI_FORMAT_DESC &description);

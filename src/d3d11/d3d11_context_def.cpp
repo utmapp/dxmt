@@ -272,8 +272,26 @@ public:
     UINT bind_flag = 0, &depth_pitch = bind_flag;
     if (auto dynamic = GetDynamicTexture(pResource, Subresource, &row_pitch, &depth_pitch)) {
       BlitObject texture(device, pResource);
-      UpdateTexture(TextureUpdateCommand(texture, Subresource, nullptr),
-                    dynamic->buffer, row_pitch, depth_pitch);
+      if (texture.FormatDescription.Flag & MTL_DXGI_FORMAT_EMULATED_BC) {
+        /* The ring buffer holds BC blocks; the pSrcData path decompresses at
+         * record time (the GPU-visible copy of a dynamic name is not CPU
+         * readable at encode time).  On a deferred context the app wrote
+         * into the allocation the deferred Map handed out -- tracked in
+         * current_dynamic_buffer_allocations -- NOT into the immediate
+         * name, which belongs to whatever the immediate context did last. */
+        auto it = ctx_state.current_dynamic_buffer_allocations.find(dynamic.ptr());
+        if (it == ctx_state.current_dynamic_buffer_allocations.end()) {
+          ERR("DeferredContext: Unmap of a dynamic texture without a prior Map in this command list");
+          return;
+        }
+        UpdateTexture(
+            TextureUpdateCommand(texture, Subresource, nullptr),
+            it->second.allocation->mappedMemory(it->second.suballocation), row_pitch, depth_pitch, 0,
+            true /* the dynamic ring is write-combined */
+        );
+      } else
+        UpdateTexture(TextureUpdateCommand(texture, Subresource, nullptr),
+                      dynamic->buffer, row_pitch, depth_pitch);
     }
   }
 

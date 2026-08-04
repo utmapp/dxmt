@@ -12,7 +12,14 @@ buffer/texture round-trips (DEFAULT/DYNAMIC/IMMUTABLE/STAGING, mips, partial
 copies), draw (basic / deferred-context / cbuffer / textured / instanced),
 depth test, additive blending, 4x MSAA resolve, compute (structured buffer +
 raw-view atomics), EVENT + OCCLUSION queries, ID3D11Fence with dxmt_event_*,
-and sRGB render targets.
+sRGB render targets, and BC1 through every upload path (IMMUTABLE initial
+data, UpdateSubresource, staging copy -- including one written after being
+recorded on a deferred context -- DYNAMIC initial data / Map(DISCARD) on the
+immediate and deferred contexts, the R32G32_UINT reinterpret-alias upload,
+staging-to-staging copies, and the FORMAT_SUPPORT2 mask).  All BC tests run
+against hardware BC or CPU emulation, whichever the device has;
+`DXMT_FORCE_BC_EMULATION=1` forces the emulated path on capable devices and
+must produce CRC-identical images.
 
 Shaders are compiled offline with fxc (SM 5.0) and embedded as DXBC
 (`shaders_dxbc.h`, regenerate with `xxd -n dxbc_<name> -i <name>.cso`); there

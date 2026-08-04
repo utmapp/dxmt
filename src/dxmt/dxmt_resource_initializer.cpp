@@ -18,9 +18,11 @@
 
 #include "Metal.hpp"
 #include "dxmt_resource_initializer.hpp"
+#include "dxmt_bc_emulation.hpp"
 #include "dxmt_format.hpp"
 #include "util_math.hpp"
 #include <cstdint>
+#include <memory>
 #include <mutex>
 
 namespace dxmt {
@@ -227,10 +229,68 @@ ResourceInitializer::initWithZero(
 }
 
 uint64_t
+ResourceInitializer::initWithCompressedData(
+    const Texture *texture, TextureAllocation *allocation, uint32_t slice, uint32_t level, const void *data,
+    size_t row_pitch, size_t depth_pitch, WMTPixelFormat bc_format
+) {
+  auto width_sub = std::max(1u, texture->width() >> level);
+  auto height_sub = std::max(1u, texture->height() >> level);
+  auto depth_sub = std::max(1u, texture->depth() >> level);
+
+  bool is_3d_tex = texture->textureType() == WMTTextureType3D;
+  size_t texel_size = MTLGetTexelSize(texture->pixelFormat());
+  size_t bytes_per_row = texel_size * width_sub;
+  size_t bytes_per_image = bytes_per_row * height_sub;
+  size_t total_bytes_needed = bytes_per_image * depth_sub;
+  /* like initWithData, never read more of a source row than the app-provided
+   * pitch says exists */
+  size_t src_bytes_per_row = ((width_sub + 3) / 4) * (size_t)BCBlockSize(bc_format);
+  size_t src_bytes_per_row_valid = std::min(row_pitch, src_bytes_per_row);
+
+  /* The decompression is the expensive part (tens of ms for a large mip) and
+   * needs nothing of the initializer; keep it outside mutex_ so concurrent
+   * initial-data uploads are not serialized behind CPU decode work.  Only the
+   * command/heap allocation and the copy into the GPU heap take the lock. */
+  auto scratch = std::unique_ptr<uint8_t[]>(new uint8_t[total_bytes_needed]);
+  for (auto depth = 0u; depth < depth_sub; depth++) {
+    DecompressBC(
+        bc_format, ptr_add(data, depth * depth_pitch), row_pitch, src_bytes_per_row_valid,
+        scratch.get() + depth * bytes_per_image, bytes_per_row, width_sub, height_sub
+    );
+  }
+
+  std::lock_guard<dxmt::mutex> lock(mutex_);
+  do {
+    RETAIN(allocation);
+    ALLOC_BLIT(wmtcmd_blit_copy_from_buffer_to_texture, copy);
+    ALLOC_GPU(temp, total_bytes_needed);
+
+    temp.updateContents(temp_offset, scratch.get(), total_bytes_needed);
+
+    copy->type = WMTBlitCommandCopyFromBufferToTexture;
+    copy->src = temp;
+    copy->src_offset = temp_offset;
+    copy->bytes_per_row = bytes_per_row;
+    copy->bytes_per_image = is_3d_tex ? bytes_per_image : 0;
+    copy->size = {width_sub, height_sub, depth_sub};
+    copy->dst = allocation->texture();
+    copy->slice = slice;
+    copy->level = level;
+    copy->origin = {0, 0, 0};
+
+  } while (0);
+
+  return current_seq_id_;
+}
+
+uint64_t
 ResourceInitializer::initWithData(
     const Texture *texture, TextureAllocation *allocation, uint32_t slice, uint32_t level, const void *data,
-    size_t row_pitch, size_t depth_pitch, uint32_t format_flags
+    size_t row_pitch, size_t depth_pitch, uint32_t format_flags, WMTPixelFormat emulated_bc
 ) {
+  if (format_flags & MTL_DXGI_FORMAT_EMULATED_BC)
+    return initWithCompressedData(texture, allocation, slice, level, data, row_pitch, depth_pitch, emulated_bc);
+
   auto width_sub = std::max(1u, texture->width() >> level);
   auto height_sub = std::max(1u, texture->height() >> level);
   auto depth_sub = std::max(1u, texture->depth() >> level);

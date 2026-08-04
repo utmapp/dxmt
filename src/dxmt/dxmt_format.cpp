@@ -1,7 +1,10 @@
 #include "ftl.hpp"
 #include "dxmt_format.hpp"
+#include "log/log.hpp"
+#include "util_env.hpp"
 #include "util_error.hpp"
 #include "dxgi.h"
+#include <atomic>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -434,12 +437,35 @@ DepthStencilPlanarFlags(WMTPixelFormat format) {
   }
 }
 
+static bool
+DeviceSupportsBC(WMT::Device device) {
+  /* DXMT_FORCE_BC_EMULATION=1 forces the emulated path on capable devices, so
+   * the decompression paths can be exercised anywhere (used by the tests). */
+  static const bool force_emulation = env::getEnvVar("DXMT_FORCE_BC_EMULATION") == "1";
+  if (force_emulation)
+    return false;
+  /* This sits on hot paths -- every BlitObject construction and SRV creation
+   * queries the format -- and the device answer never changes, so don't pay
+   * an Objective-C round trip (a unix call, under Wine) per lookup.  Keyed by
+   * handle in case more than one device ever shows up; a benign race merely
+   * repeats the query. */
+  static std::atomic<uint64_t> cached_device{0};
+  static std::atomic<bool> cached_support{false};
+  if (cached_device.load(std::memory_order_acquire) == device.handle)
+    return cached_support.load(std::memory_order_relaxed);
+  bool support = device.supportsBCTextureCompression();
+  cached_support.store(support, std::memory_order_relaxed);
+  cached_device.store(device.handle, std::memory_order_release);
+  return support;
+}
+
 int32_t
 MTLQueryDXGIFormat(WMT::Device device, uint32_t format, MTL_DXGI_FORMAT_DESC &description) {
   description.PixelFormat = WMTPixelFormatInvalid;
   description.AttributeFormat = WMTAttributeFormatInvalid;
   description.BytesPerTexel = 0;
   description.Flag = 0;
+  description.EmulatedBC = WMTPixelFormatInvalid;
 
   switch (format) {
   case DXGI_FORMAT_R32G32B32A32_TYPELESS: {
@@ -1055,6 +1081,56 @@ MTLQueryDXGIFormat(WMT::Device device, uint32_t format, MTL_DXGI_FORMAT_DESC &de
   case DXGI_FORMAT_UNKNOWN:
   default:
     return E_FAIL;
+  }
+
+  /* Without device BC support the BC enums are not even valid MTLPixelFormat
+   * values (iOS before 16.4, A-series GPUs): handing one to Metal is a
+   * validation abort, not a soft failure.  BC is also mandatory at FL10+, so
+   * failing creation just moves the crash into the app (a Neptune guest tears
+   * down its whole context).  Instead emulate: stand in an uncompressed
+   * format and decompress on the CPU at every upload (dxmt_bc_emulation).
+   * BlockSize stays the BC block size -- the D3D-visible layout (Map pitches,
+   * UpdateSubresource data, staging contents) remains block-compressed. */
+  if ((description.Flag & MTL_DXGI_FORMAT_BC) && !DeviceSupportsBC(device)) {
+    static bool logged_once = false;
+    if (!logged_once) {
+      logged_once = true;
+      WARN("device has no BC texture support: emulating BC formats (CPU decompression on upload)");
+    }
+    description.EmulatedBC = description.PixelFormat;
+    description.Flag |= MTL_DXGI_FORMAT_EMULATED_BC;
+    switch (description.EmulatedBC) {
+    case WMTPixelFormatBC1_RGBA:
+    case WMTPixelFormatBC2_RGBA:
+    case WMTPixelFormatBC3_RGBA:
+    case WMTPixelFormatBC7_RGBAUnorm:
+      description.PixelFormat = WMTPixelFormatRGBA8Unorm;
+      break;
+    case WMTPixelFormatBC1_RGBA_sRGB:
+    case WMTPixelFormatBC2_RGBA_sRGB:
+    case WMTPixelFormatBC3_RGBA_sRGB:
+    case WMTPixelFormatBC7_RGBAUnorm_sRGB:
+      description.PixelFormat = WMTPixelFormatRGBA8Unorm_sRGB;
+      break;
+    case WMTPixelFormatBC4_RUnorm:
+      description.PixelFormat = WMTPixelFormatR8Unorm;
+      break;
+    case WMTPixelFormatBC4_RSnorm:
+      description.PixelFormat = WMTPixelFormatR8Snorm;
+      break;
+    case WMTPixelFormatBC5_RGUnorm:
+      description.PixelFormat = WMTPixelFormatRG8Unorm;
+      break;
+    case WMTPixelFormatBC5_RGSnorm:
+      description.PixelFormat = WMTPixelFormatRG8Snorm;
+      break;
+    case WMTPixelFormatBC6H_RGBUfloat:
+    case WMTPixelFormatBC6H_RGBFloat:
+      description.PixelFormat = WMTPixelFormatRGBA16Float;
+      break;
+    default:
+      break;
+    }
   }
 
   return S_OK;

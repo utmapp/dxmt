@@ -47,7 +47,15 @@ public:
   uint64_t initWithZero(const Texture *texture, TextureAllocation *allocation, uint32_t slice, uint32_t level);
   uint64_t initWithData(
       const Texture *texture, TextureAllocation *allocation, uint32_t slice, uint32_t level, const void *data,
-      size_t row_pitch, size_t depth_pitch, uint32_t format_flags
+      size_t row_pitch, size_t depth_pitch, uint32_t format_flags,
+      WMTPixelFormat emulated_bc = WMTPixelFormatInvalid
+  );
+
+  /* BC data for a texture whose device has no BC support: decompress on the
+   * CPU into the emulated uncompressed format (MTL_DXGI_FORMAT_EMULATED_BC). */
+  uint64_t initWithCompressedData(
+      const Texture *texture, TextureAllocation *allocation, uint32_t slice, uint32_t level, const void *data,
+      size_t row_pitch, size_t depth_pitch, WMTPixelFormat bc_format
   );
 
   /*

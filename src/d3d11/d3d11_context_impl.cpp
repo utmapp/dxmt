@@ -31,6 +31,7 @@
 #include "d3d11_device.hpp"
 #include "d3d11_pipeline.hpp"
 #include "d3d11_query.hpp"
+#include "dxmt_bc_emulation.hpp"
 #include "dxmt_buffer.hpp"
 #include "dxmt_context.hpp"
 #include "dxmt_format.hpp"
@@ -41,8 +42,16 @@
 #include "util_flags.hpp"
 #include "util_math.hpp"
 #include "util_win32_compat.h"
+#include <cstring>
+#include <memory>
+#include <vector>
 
 namespace dxmt {
+
+/* A draw about to execute has no pipeline (its Metal compile failed): the
+ * geometry silently does not render, which reads as invisible objects or
+ * black UI in the field -- make that state visible in the log without
+ * spamming once per draw. */
 
 template<typename Object> Rc<Object> forward_rc(Rc<Object>& obj);
 
@@ -3889,6 +3898,11 @@ public:
     if (cmd.Invalid)
       return;
     if ((cmd.SrcFormat.Flag & MTL_DXGI_FORMAT_BC) != (cmd.DstFormat.Flag & MTL_DXGI_FORMAT_BC)) {
+      /* Reinterpreting copies between BC blocks and same-footprint uint
+       * texels rely on the raw block bytes.  Under BC emulation those exist
+       * only on the staging side (staging keeps the D3D block layout); the
+       * helpers below handle each combination and reject the ones whose
+       * blocks live in a decompressed stand-in texture. */
       if (cmd.SrcFormat.Flag & MTL_DXGI_FORMAT_BC) {
         return CopyTextureFromCompressed(std::move(cmd));
       } else {
@@ -3896,6 +3910,60 @@ public:
       }
     }
     return CopyTextureBitcast(std::move(cmd));
+  }
+
+  /*
+   * Decompress BC blocks held in a CPU-visible staging resource into (a
+   * region of) the uncompressed stand-in texture of an emulated-BC resource.
+   * `block_x`/`block_y` locate the first block in the staging layout,
+   * `block_bytes` is the byte size of one block there (the staging format's
+   * BytesPerTexel), and `size` is the destination region in texels.
+   *
+   * The read of the staging memory and the upload-buffer fill happen at
+   * ENCODE time, not record time: a deferred context's list must sample the
+   * staging contents as of ExecuteCommandList (the app may fill the staging
+   * resource on the immediate context after recording the copy), and encode
+   * replay resolves the buffer to the allocation current at this point of
+   * the command stream on both context kinds.
+   */
+  void
+  EmitDecompressedUpload(
+      Rc<StagingResource> &&staging_src, Rc<Texture> &&dst, TextureCopyCommand &&cmd, WMTPixelFormat bc_format,
+      uint32_t block_x, uint32_t block_y, uint32_t block_bytes, WMTSize size
+  ) {
+    SwitchToBlitEncoder(CommandBufferState::UpdateBlitEncoderActive);
+    UseCopySource(staging_src);
+    EmitOP([staging = std::move(staging_src), dst_ = std::move(dst), cmd = std::move(cmd), bc_format, block_x,
+            block_y, block_bytes, size](ArgumentEncodingContext &enc) {
+      uint32_t texel_size = BCEmulatedTexelSize(bc_format);
+      uint32_t bytes_per_row = size.width * texel_size;
+      uint32_t bytes_per_image = bytes_per_row * size.height;
+      auto [src, src_sub_offset] = enc.access(staging->buffer(), 0, staging->length, ResourceAccess::Read);
+      auto [upload, upload_offset] = enc.queue().AllocateStagingBuffer((uint64_t)bytes_per_image * size.depth, 16);
+      const uint8_t *src_cpu = reinterpret_cast<const uint8_t *>(src->mappedMemory(0)) + src_sub_offset;
+      auto scratch = std::unique_ptr<uint8_t[]>(new uint8_t[bytes_per_image]);
+      for (uint32_t z = 0; z < size.depth; z++) {
+        const uint8_t *slice = src_cpu + (cmd.SrcOrigin.z + z) * staging->bytesPerImage +
+                               block_y * staging->bytesPerRow + block_x * block_bytes;
+        DecompressBC(
+            bc_format, slice, staging->bytesPerRow, staging->bytesPerRow - block_x * (size_t)block_bytes,
+            scratch.get(), bytes_per_row, size.width, size.height
+        );
+        upload.updateContents(upload_offset + z * (uint64_t)bytes_per_image, scratch.get(), bytes_per_image);
+      }
+      auto dst_tex = enc.access(dst_, cmd.Dst.MipLevel, cmd.Dst.ArraySlice, ResourceAccess::Write);
+      auto &cmd_cptex = enc.encodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_texture>();
+      cmd_cptex.type = WMTBlitCommandCopyFromBufferToTexture;
+      cmd_cptex.src = upload;
+      cmd_cptex.src_offset = upload_offset;
+      cmd_cptex.bytes_per_row = bytes_per_row;
+      cmd_cptex.bytes_per_image = bytes_per_image;
+      cmd_cptex.size = size;
+      cmd_cptex.dst = dst_tex;
+      cmd_cptex.slice = cmd.Dst.ArraySlice;
+      cmd_cptex.level = cmd.Dst.MipLevel;
+      cmd_cptex.origin = cmd.DstOrigin;
+    });
   }
 
   void
@@ -3910,7 +3978,28 @@ public:
           auto [src, src_sub_offset] = enc.access(src_->buffer(), 0, src_->length, ResourceAccess::Read);
           auto [dst, dst_sub_offset] = enc.access(dst_->buffer(), 0, dst_->length, ResourceAccess::Write);
           if (cmd.SrcFormat.Flag & MTL_DXGI_FORMAT_BC) {
-            ERR("copy between staging BC texture");
+            /* both sides hold the D3D block layout (also under emulation);
+             * copy rows of blocks */
+            uint32_t src_block_x = cmd.SrcOrigin.x >> 2, src_block_y = cmd.SrcOrigin.y >> 2;
+            uint32_t dst_block_x = cmd.DstOrigin.x >> 2, dst_block_y = cmd.DstOrigin.y >> 2;
+            uint32_t block_w = (cmd.SrcSize.width + 3) >> 2, block_h = (cmd.SrcSize.height + 3) >> 2;
+            for (unsigned offset_z = 0; offset_z < cmd.SrcSize.depth; offset_z++) {
+              for (unsigned block_row = 0; block_row < block_h; block_row++) {
+                auto src_offset = (cmd.SrcOrigin.z + offset_z) * src_->bytesPerImage +
+                                  (src_block_y + block_row) * src_->bytesPerRow +
+                                  src_block_x * cmd.SrcFormat.BytesPerTexel;
+                auto dst_offset = (cmd.DstOrigin.z + offset_z) * dst_->bytesPerImage +
+                                  (dst_block_y + block_row) * dst_->bytesPerRow +
+                                  dst_block_x * cmd.DstFormat.BytesPerTexel;
+                auto &cmdcp = enc.encodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
+                cmdcp.type = WMTBlitCommandCopyFromBufferToBuffer;
+                cmdcp.copy_length = block_w * cmd.DstFormat.BytesPerTexel;
+                cmdcp.src = src->buffer();
+                cmdcp.src_offset = src_sub_offset + src_offset;
+                cmdcp.dst = dst->buffer();
+                cmdcp.dst_offset = dst_sub_offset + dst_offset;
+              }
+            }
             return;
           }
           for (unsigned offset_z = 0; offset_z < cmd.SrcSize.depth; offset_z++) {
@@ -3944,6 +4033,13 @@ public:
             );
           });
           promote_flush = true;
+          return;
+        }
+        if (cmd.SrcFormat.Flag & MTL_DXGI_FORMAT_EMULATED_BC) {
+          /* would need re-compression: the staging side is BC blocks, the
+           * texture is the uncompressed stand-in */
+          ERR("CopyTexture: BC readback (default->staging) is not supported under BC emulation (dxgi=",
+              cmd.Src.Format, ")");
           return;
         }
         SwitchToBlitEncoder(CommandBufferState::ReadbackBlitEncoderActive);
@@ -3984,6 +4080,19 @@ public:
           });
           return;
         }
+        if (cmd.SrcFormat.Flag & MTL_DXGI_FORMAT_EMULATED_BC) {
+          /* the staging side holds BC blocks; decompress into an upload
+           * buffer (at encode time -- see EmitDecompressedUpload) */
+          auto bc_format = cmd.SrcFormat.EmulatedBC;
+          uint32_t block_x = cmd.SrcOrigin.x >> 2, block_y = cmd.SrcOrigin.y >> 2;
+          uint32_t block_bytes = cmd.SrcFormat.BytesPerTexel;
+          auto size = cmd.SrcSize;
+          EmitDecompressedUpload(
+              std::move(staging_src), std::move(dst), std::move(cmd), bc_format, block_x, block_y, block_bytes,
+              size
+          );
+          return;
+        }
         // copy from staging to default
         SwitchToBlitEncoder(CommandBufferState::UpdateBlitEncoderActive);
         UseCopySource(staging_src);
@@ -4020,6 +4129,14 @@ public:
           auto src = enc.access(src_, cmd.Src.MipLevel, cmd.Src.ArraySlice, ResourceAccess::Read);
           auto dst = enc.access(dst_, cmd.Dst.MipLevel, cmd.Dst.ArraySlice, ResourceAccess::Write);
           if (Forget_sRGB(dst_format) != Forget_sRGB(src_format)) {
+
+            if (cmd.SrcFormat.Flag & MTL_DXGI_FORMAT_EMULATED_BC) {
+              /* the textures hold texels, not block bytes: reinterpreting
+               * between different BC families cannot work under emulation */
+              ERR("CopyTexture: cross-format BC copy is not supported under BC emulation (src_dxgi=",
+                  cmd.Src.Format, " dst_dxgi=", cmd.Dst.Format, ")");
+              return;
+            }
 
             // bitcast, using a temporary buffer
             size_t bytes_per_row, bytes_per_image, bytes_total;
@@ -4080,13 +4197,81 @@ public:
 
   void
   CopyTextureFromCompressed(TextureCopyCommand &&cmd) {
+    /* src is block-compressed, dst the same-footprint uint format: the copy
+     * reinterprets raw block bytes as uint texels, one dst texel per block
+     * (legal per CopySubresourceRegion's bit-layout-compatibility rule).
+     * Under BC emulation the block bytes exist only where the D3D block
+     * layout is kept: in staging resources.  A default BC texture is the
+     * decompressed stand-in, so it cannot serve as the block source. */
     if (auto staging_dst = GetStagingResource(cmd.pDst, cmd.DstSubresource)) {
-      UNIMPLEMENTED("copy texture: from compressed to staging");
+      if (GetStagingResource(cmd.pSrc, cmd.SrcSubresource)) {
+        UNIMPLEMENTED("copy texture: from compressed staging to staging");
+      } else if (auto src = GetTexture(cmd.pSrc)) {
+        if (cmd.SrcFormat.Flag & MTL_DXGI_FORMAT_EMULATED_BC) {
+          /* the texture holds decompressed texels; recovering blocks would
+           * need re-compression */
+          ERR("CopyTexture: BC->uint readback is not supported under BC emulation (src_dxgi=", cmd.Src.Format,
+              " dst_dxgi=", cmd.Dst.Format, ")");
+          return;
+        }
+        /* readback: rows of blocks land as rows of uint texels */
+        SwitchToBlitEncoder(CommandBufferState::ReadbackBlitEncoderActive);
+        UseCopyDestination(staging_dst);
+        EmitOP([src_ = std::move(src), dst_ = std::move(staging_dst),
+                cmd = std::move(cmd)](ArgumentEncodingContext &enc) {
+          auto src = enc.access(src_, cmd.Src.MipLevel, cmd.Src.ArraySlice, ResourceAccess::Read);
+          auto [dst, dst_sub_offset] = enc.access(dst_->buffer(), 0, dst_->length, ResourceAccess::Write);
+          auto offset = cmd.DstOrigin.z * dst_->bytesPerImage + cmd.DstOrigin.y * dst_->bytesPerRow +
+                        cmd.DstOrigin.x * cmd.DstFormat.BytesPerTexel;
+          auto &cmd_cpbuf = enc.encodeBlitCommand<wmtcmd_blit_copy_from_texture_to_buffer>();
+          cmd_cpbuf.type = WMTBlitCommandCopyFromTextureToBuffer;
+          cmd_cpbuf.src = src;
+          cmd_cpbuf.slice = cmd.Src.ArraySlice;
+          cmd_cpbuf.level = cmd.Src.MipLevel;
+          cmd_cpbuf.origin = cmd.SrcOrigin;
+          cmd_cpbuf.size = cmd.SrcSize;
+          cmd_cpbuf.dst = dst->buffer();
+          cmd_cpbuf.offset = offset + dst_sub_offset;
+          cmd_cpbuf.bytes_per_row = dst_->bytesPerRow;
+          cmd_cpbuf.bytes_per_image = dst_->bytesPerImage;
+        });
+        promote_flush = true;
+      } else {
+        UNREACHABLE
+      }
     } else if (auto dst = GetTexture(cmd.pDst)) {
       if (auto staging_src = GetStagingResource(cmd.pSrc, cmd.SrcSubresource)) {
-        // copy from staging to default
-        UNIMPLEMENTED("copy texture: from compressed staging to default");
+        /* staging blocks -> uint texture: a plain upload of the raw block
+         * bytes; sound under emulation too, since staging keeps the block
+         * layout and the uint destination is a real texture */
+        SwitchToBlitEncoder(CommandBufferState::UpdateBlitEncoderActive);
+        UseCopySource(staging_src);
+        EmitOP([dst_ = std::move(dst), src_ = std::move(staging_src),
+                cmd = std::move(cmd)](ArgumentEncodingContext &enc) {
+          auto [src, src_sub_offset] = enc.access(src_->buffer(), 0, src_->length, ResourceAccess::Read);
+          auto dst = enc.access(dst_, cmd.Dst.MipLevel, cmd.Dst.ArraySlice, ResourceAccess::Write);
+          auto block_w = (align(cmd.SrcSize.width, 4u) >> 2);
+          auto block_h = (align(cmd.SrcSize.height, 4u) >> 2);
+          auto offset = cmd.SrcOrigin.z * src_->bytesPerImage + (cmd.SrcOrigin.y >> 2) * src_->bytesPerRow +
+                        (cmd.SrcOrigin.x >> 2) * cmd.SrcFormat.BytesPerTexel;
+          auto &cmd_cptex = enc.encodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_texture>();
+          cmd_cptex.type = WMTBlitCommandCopyFromBufferToTexture;
+          cmd_cptex.src = src->buffer();
+          cmd_cptex.src_offset = offset + src_sub_offset;
+          cmd_cptex.bytes_per_row = src_->bytesPerRow;
+          cmd_cptex.bytes_per_image = src_->bytesPerImage;
+          cmd_cptex.size = {block_w, block_h, cmd.SrcSize.depth};
+          cmd_cptex.dst = dst;
+          cmd_cptex.slice = cmd.Dst.ArraySlice;
+          cmd_cptex.level = cmd.Dst.MipLevel;
+          cmd_cptex.origin = cmd.DstOrigin;
+        });
       } else if (auto src = GetTexture(cmd.pSrc)) {
+        if (cmd.SrcFormat.Flag & MTL_DXGI_FORMAT_EMULATED_BC) {
+          ERR("CopyTexture: BC->uint reinterpret copy is not supported under BC emulation (src_dxgi=",
+              cmd.Src.Format, " dst_dxgi=", cmd.Dst.Format, ")");
+          return;
+        }
         // on-device copy
         SwitchToBlitEncoder(CommandBufferState::BlitEncoderActive);
         EmitOP([dst_ = std::move(dst), src_ = std::move(src), cmd = std::move(cmd)](ArgumentEncodingContext &enc) {
@@ -4131,13 +4316,90 @@ public:
 
   void
   CopyTextureToCompressed(TextureCopyCommand &&cmd) {
+    /* src is the same-footprint uint format, dst is block-compressed: the
+     * uint texels ARE raw BC blocks.  Under emulation the block bytes can be
+     * written wherever the D3D block layout is kept (staging) or wherever
+     * they can be decompressed to (the stand-in texture); only a GPU-resident
+     * uint source feeding a stand-in texture is out of reach. */
     if (auto staging_dst = GetStagingResource(cmd.pDst, cmd.DstSubresource)) {
-      UNIMPLEMENTED("copy texture: copy to compressed staging");
+      if (GetStagingResource(cmd.pSrc, cmd.SrcSubresource)) {
+        UNIMPLEMENTED("copy texture: staging to compressed staging");
+      } else if (auto src = GetTexture(cmd.pSrc)) {
+        /* readback of uint texels into rows of blocks; sound under emulation
+         * too, since the uint source is a real texture and staging keeps the
+         * block layout */
+        SwitchToBlitEncoder(CommandBufferState::ReadbackBlitEncoderActive);
+        UseCopyDestination(staging_dst);
+        EmitOP([src_ = std::move(src), dst_ = std::move(staging_dst),
+                cmd = std::move(cmd)](ArgumentEncodingContext &enc) {
+          auto src = enc.access(src_, cmd.Src.MipLevel, cmd.Src.ArraySlice, ResourceAccess::Read);
+          auto [dst, dst_sub_offset] = enc.access(dst_->buffer(), 0, dst_->length, ResourceAccess::Write);
+          auto offset = cmd.DstOrigin.z * dst_->bytesPerImage + (cmd.DstOrigin.y >> 2) * dst_->bytesPerRow +
+                        (cmd.DstOrigin.x >> 2) * cmd.DstFormat.BytesPerTexel;
+          auto &cmd_cpbuf = enc.encodeBlitCommand<wmtcmd_blit_copy_from_texture_to_buffer>();
+          cmd_cpbuf.type = WMTBlitCommandCopyFromTextureToBuffer;
+          cmd_cpbuf.src = src;
+          cmd_cpbuf.slice = cmd.Src.ArraySlice;
+          cmd_cpbuf.level = cmd.Src.MipLevel;
+          cmd_cpbuf.origin = cmd.SrcOrigin;
+          cmd_cpbuf.size = cmd.SrcSize;
+          cmd_cpbuf.dst = dst->buffer();
+          cmd_cpbuf.offset = offset + dst_sub_offset;
+          cmd_cpbuf.bytes_per_row = dst_->bytesPerRow;
+          cmd_cpbuf.bytes_per_image = dst_->bytesPerImage;
+        });
+        promote_flush = true;
+      } else {
+        UNREACHABLE
+      }
     } else if (auto dst = GetTexture(cmd.pDst)) {
       if (auto staging_src = GetStagingResource(cmd.pSrc, cmd.SrcSubresource)) {
-        // copy from staging to default
-        UNIMPLEMENTED("copy texture: from staging to compressed default");
+        /* uint staging rows are rows of blocks */
+        auto clamped_dst_width =
+            std::min(cmd.SrcSize.width << 2, std::max(cmd.Dst.Width, 1u) - cmd.DstOrigin.x);
+        auto clamped_dst_height =
+            std::min(cmd.SrcSize.height << 2, std::max(cmd.Dst.Height, 1u) - cmd.DstOrigin.y);
+        if (cmd.DstFormat.Flag & MTL_DXGI_FORMAT_EMULATED_BC) {
+          /* decompress the blocks straight out of the staging buffer into
+           * the stand-in texture (at encode time) */
+          auto bc_format = cmd.DstFormat.EmulatedBC;
+          uint32_t block_x = cmd.SrcOrigin.x, block_y = cmd.SrcOrigin.y;
+          uint32_t block_bytes = cmd.SrcFormat.BytesPerTexel;
+          WMTSize size = {clamped_dst_width, clamped_dst_height, cmd.SrcSize.depth};
+          EmitDecompressedUpload(
+              std::move(staging_src), std::move(dst), std::move(cmd), bc_format, block_x, block_y, block_bytes,
+              size
+          );
+          return;
+        }
+        SwitchToBlitEncoder(CommandBufferState::UpdateBlitEncoderActive);
+        UseCopySource(staging_src);
+        EmitOP([dst_ = std::move(dst), src_ = std::move(staging_src), cmd = std::move(cmd), clamped_dst_width,
+                clamped_dst_height](ArgumentEncodingContext &enc) {
+          auto [src, src_sub_offset] = enc.access(src_->buffer(), 0, src_->length, ResourceAccess::Read);
+          auto dst = enc.access(dst_, cmd.Dst.MipLevel, cmd.Dst.ArraySlice, ResourceAccess::Write);
+          auto offset = cmd.SrcOrigin.z * src_->bytesPerImage + cmd.SrcOrigin.y * src_->bytesPerRow +
+                        cmd.SrcOrigin.x * cmd.SrcFormat.BytesPerTexel;
+          auto &cmd_cptex = enc.encodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_texture>();
+          cmd_cptex.type = WMTBlitCommandCopyFromBufferToTexture;
+          cmd_cptex.src = src->buffer();
+          cmd_cptex.src_offset = offset + src_sub_offset;
+          cmd_cptex.bytes_per_row = src_->bytesPerRow;
+          cmd_cptex.bytes_per_image = src_->bytesPerImage;
+          cmd_cptex.size = {clamped_dst_width, clamped_dst_height, cmd.SrcSize.depth};
+          cmd_cptex.dst = dst;
+          cmd_cptex.slice = cmd.Dst.ArraySlice;
+          cmd_cptex.level = cmd.Dst.MipLevel;
+          cmd_cptex.origin = cmd.DstOrigin;
+        });
       } else if (auto src = GetTexture(cmd.pSrc)) {
+        if (cmd.DstFormat.Flag & MTL_DXGI_FORMAT_EMULATED_BC) {
+          /* GPU-resident uint texels feeding a stand-in texture would need a
+           * GPU-side decode */
+          ERR("CopyTexture: uint->BC reinterpret copy from a non-staging source is not supported under BC "
+              "emulation (src_dxgi=", cmd.Src.Format, " dst_dxgi=", cmd.Dst.Format, ")");
+          return;
+        }
         // on-device copy
         SwitchToBlitEncoder(CommandBufferState::BlitEncoderActive);
         EmitOP([dst_ = std::move(dst), src_ = std::move(src), cmd = std::move(cmd)](ArgumentEncodingContext &enc) {
@@ -4186,7 +4448,8 @@ public:
 
   void
   UpdateTexture(
-      TextureUpdateCommand &&cmd, const void *pSrcData, UINT SrcRowPitch, UINT SrcDepthPitch, UINT CopyFlags
+      TextureUpdateCommand &&cmd, const void *pSrcData, UINT SrcRowPitch, UINT SrcDepthPitch, UINT CopyFlags,
+      bool SrcIsWriteCombined = false
   ) {
     if (cmd.Invalid)
       return;
@@ -4194,6 +4457,56 @@ public:
     std::lock_guard<mutex_t> lock(mutex);
 
     if (auto dst = GetTexture(cmd.pDst)) {
+      if (cmd.DstFormat.Flag & MTL_DXGI_FORMAT_EMULATED_BC) {
+        /* pSrcData is BC blocks (SrcRowPitch = bytes per block row); the
+         * Metal texture is uncompressed, so decompress on the way in */
+        uint32_t texel_size = BCEmulatedTexelSize(cmd.DstFormat.EmulatedBC);
+        uint32_t bytes_per_row = cmd.DstSize.width * texel_size;
+        uint32_t bytes_per_image = bytes_per_row * cmd.DstSize.height;
+        uint32_t src_block_rows = (cmd.DstSize.height + 3) / 4;
+        /* an app-provided pitch (UpdateSubresource) can be smaller than a
+         * tight block row; never read past it */
+        size_t src_bytes_per_row = ((cmd.DstSize.width + 3) / 4) * (size_t)BCBlockSize(cmd.DstFormat.EmulatedBC);
+        size_t src_bytes_per_row_valid = std::min<size_t>(SrcRowPitch, src_bytes_per_row);
+        auto [staging_buffer, offset] = AllocateStagingBuffer(bytes_per_image * cmd.DstSize.depth, 16);
+        /* bcdec fetches 8/16 bytes at a time; on write-combined sources
+         * (the dynamic ring) each fetch is an uncached transaction, so pull
+         * the compressed bytes into cacheable memory with one streaming
+         * copy first */
+        std::unique_ptr<uint8_t[]> wc_copy;
+        if (SrcIsWriteCombined) {
+          size_t src_total =
+              (size_t)SrcDepthPitch * (cmd.DstSize.depth - 1) + (size_t)SrcRowPitch * src_block_rows;
+          wc_copy.reset(new uint8_t[src_total]);
+          std::memcpy(wc_copy.get(), pSrcData, src_total);
+          pSrcData = wc_copy.get();
+        }
+        auto scratch = std::unique_ptr<uint8_t[]>(new uint8_t[bytes_per_image]);
+        for (unsigned depthSlice = 0; depthSlice < cmd.DstSize.depth; depthSlice++) {
+          DecompressBC(
+              cmd.DstFormat.EmulatedBC, ((const char *)pSrcData) + depthSlice * SrcDepthPitch, SrcRowPitch,
+              src_bytes_per_row_valid, scratch.get(), bytes_per_row, cmd.DstSize.width, cmd.DstSize.height
+          );
+          staging_buffer.updateContents(offset + depthSlice * bytes_per_image, scratch.get(), bytes_per_image);
+        }
+        SwitchToBlitEncoder(CommandBufferState::UpdateBlitEncoderActive);
+        EmitOP([staging_buffer, offset, dst = std::move(dst), cmd = std::move(cmd), bytes_per_row,
+                bytes_per_image](ArgumentEncodingContext &enc) {
+          auto texture = enc.access(dst, cmd.Dst.MipLevel, cmd.Dst.ArraySlice, ResourceAccess::Write);
+          auto &cmd_cptex = enc.encodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_texture>();
+          cmd_cptex.type = WMTBlitCommandCopyFromBufferToTexture;
+          cmd_cptex.src = staging_buffer;
+          cmd_cptex.src_offset = offset;
+          cmd_cptex.bytes_per_row = bytes_per_row;
+          cmd_cptex.bytes_per_image = bytes_per_image;
+          cmd_cptex.size = cmd.DstSize;
+          cmd_cptex.dst = texture;
+          cmd_cptex.slice = cmd.Dst.ArraySlice;
+          cmd_cptex.level = cmd.Dst.MipLevel;
+          cmd_cptex.origin = cmd.DstOrigin;
+        });
+        return;
+      }
       auto bytes_per_depth_slice = cmd.EffectiveRows * cmd.EffectiveBytesPerRow;
       auto [staging_buffer, offset] = AllocateStagingBuffer(bytes_per_depth_slice * cmd.DstSize.depth, 16);
       if (cmd.EffectiveBytesPerRow == SrcRowPitch) {
@@ -4985,8 +5298,9 @@ public:
                ArgumentEncodingContext &enc) {
       MTL_COMPILED_COMPUTE_PIPELINE ComputePipeline;
       pso->GetPipeline(&ComputePipeline); // may block
-      if (!ComputePipeline.PipelineState)
+      if (!ComputePipeline.PipelineState) {
         return;
+      }
       auto &cmd = enc.encodeComputeCommand<wmtcmd_compute_setpso>();
       cmd.type = WMTComputeCommandSetPSO;
       cmd.pso = ComputePipeline.PipelineState;

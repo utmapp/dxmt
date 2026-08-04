@@ -298,8 +298,17 @@ public:
     };
     if (auto dynamic = GetDynamicTexture(pResource, Subresource, &row_pitch, &depth_pitch)) {
       BlitObject texture(device, pResource);
-      UpdateTexture(TextureUpdateCommand(texture, Subresource, nullptr),
-                    dynamic->buffer, row_pitch, depth_pitch);
+      if (texture.FormatDescription.Flag & MTL_DXGI_FORMAT_EMULATED_BC)
+        /* the ring buffer holds BC blocks; the pSrcData path decompresses at
+         * record time (the GPU-visible copy of a dynamic name is not CPU
+         * readable at encode time) */
+        UpdateTexture(
+            TextureUpdateCommand(texture, Subresource, nullptr), dynamic->immediateMappedMemory(), row_pitch,
+            depth_pitch, 0, true /* the dynamic ring is write-combined */
+        );
+      else
+        UpdateTexture(TextureUpdateCommand(texture, Subresource, nullptr),
+                      dynamic->buffer, row_pitch, depth_pitch);
     }
   }
 

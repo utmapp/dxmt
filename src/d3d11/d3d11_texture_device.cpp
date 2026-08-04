@@ -410,7 +410,7 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
         auto &data = pInitialData[sub.SubresourceId];
         initializer.initWithData(
             texture.ptr(), texture->current(), sub.ArraySlice, sub.MipLevel, data.pSysMem, data.SysMemPitch,
-            data.SysMemSlicePitch, format_desc.Flag
+            data.SysMemSlicePitch, format_desc.Flag, format_desc.EmulatedBC
         );
       }
     }

@@ -534,6 +534,17 @@ public:
       outFormatSupport |= D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW;
     }
 
+    /* Emulated BC is sample-only: the capability bits above came from the
+     * uncompressed stand-in format, but D3D must not see BC as renderable,
+     * writable or bitcastable. */
+    if (metal_format.Flag & MTL_DXGI_FORMAT_EMULATED_BC) {
+      outFormatSupport &=
+          (D3D11_FORMAT_SUPPORT_TEXTURE1D | D3D11_FORMAT_SUPPORT_TEXTURE2D | D3D11_FORMAT_SUPPORT_TEXTURE3D |
+           D3D11_FORMAT_SUPPORT_TEXTURECUBE | D3D11_FORMAT_SUPPORT_SHADER_LOAD | D3D11_FORMAT_SUPPORT_SHADER_SAMPLE |
+           D3D11_FORMAT_SUPPORT_SHADER_GATHER | D3D11_FORMAT_SUPPORT_MIP | D3D11_FORMAT_SUPPORT_CPU_LOCKABLE |
+           D3D11_FORMAT_SUPPORT_MULTISAMPLE_LOAD);
+    }
+
     if (Format == DXGI_FORMAT_R32_FLOAT || Format == DXGI_FORMAT_R32_UINT ||
         Format == DXGI_FORMAT_R32_SINT || Format == DXGI_FORMAT_R32G32_FLOAT ||
         Format == DXGI_FORMAT_R32G32_UINT ||
@@ -621,6 +632,14 @@ public:
                                     metal_format))) {
         return E_INVALIDARG;
       }
+
+      /* Emulated BC: the capability table below would be consulted with the
+       * uncompressed stand-in format and advertise typed UAV load/store for
+       * a block-compressed format, which no real driver reports (matching
+       * the sample-only mask CheckFormatSupport applies).  BC support2 is 0. */
+      if (metal_format.Flag & MTL_DXGI_FORMAT_EMULATED_BC)
+        return S_OK;
+
       auto Capability = GetMTLPixelFormatCapability(metal_format.PixelFormat);
 
       if (any_bit_set(Capability & FormatCapability::TextureBufferRead)) {

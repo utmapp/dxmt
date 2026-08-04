@@ -22,6 +22,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -963,6 +965,284 @@ test_srgb(Ctx &c) {
   emit("[CRC] %s.rt = 0x%08x", T, crc32_of(img.data(), img.size()));
 }
 
+/* BC1 sampling.  8x8 IMMUTABLE BC1 texture = 2x2 blocks, each a solid color;
+ * point-sample it over a fullscreen quad and expect one color per quadrant.
+ *
+ * On devices where Metal has no BC support (iOS < 16.4, A-series GPUs) the
+ * formats must not reach Metal at all: CheckFormatSupport reports 0 and
+ * creation fails cleanly.  Handing MTLPixelFormatBC1_RGBA (130) to such a
+ * device is the `pixelFormat (130) is not a valid MTLPixelFormat' validation
+ * abort seen in the field. */
+static void
+test_bc1_texture(Ctx &c) {
+  const char *T = "bc1_texture";
+  UINT support = 0;
+  HRESULT hr = c.device->CheckFormatSupport(DXGI_FORMAT_BC1_UNORM, &support);
+  bool supported = SUCCEEDED(hr) && (support & D3D11_FORMAT_SUPPORT_TEXTURE2D);
+  emit("[INFO] bc1: support=0x%08x -> %s", support, supported ? "supported" : "unsupported");
+
+  /* A solid BC1 block: color0 == color1 (RGB565), all indices 0. */
+  auto solid_block = [](uint8_t *out, uint16_t c565) {
+    out[0] = (uint8_t)(c565 & 0xff);
+    out[1] = (uint8_t)(c565 >> 8);
+    out[2] = out[0];
+    out[3] = out[1];
+    out[4] = out[5] = out[6] = out[7] = 0;
+  };
+  /* Block row 0: red, green; block row 1: blue, yellow. */
+  uint8_t blocks[4][8];
+  solid_block(blocks[0], 0xF800);
+  solid_block(blocks[1], 0x07E0);
+  solid_block(blocks[2], 0x001F);
+  solid_block(blocks[3], 0xFFE0);
+
+  D3D11_TEXTURE2D_DESC td = {};
+  td.Width = 8;
+  td.Height = 8;
+  td.MipLevels = 1;
+  td.ArraySize = 1;
+  td.Format = DXGI_FORMAT_BC1_UNORM;
+  td.SampleDesc = {1, 0};
+  td.Usage = D3D11_USAGE_IMMUTABLE;
+  td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+  D3D11_SUBRESOURCE_DATA init = {blocks, 16 /* 2 blocks per row * 8 bytes */, 0};
+  Com<ID3D11Texture2D> tex;
+  hr = c.device->CreateTexture2D(&td, &init, &tex);
+  if (!supported) {
+    /* Must fail cleanly -- reaching Metal with a BC pixel format aborts. */
+    CHECK(T, FAILED(hr) && !tex);
+    return;
+  }
+  CHECK(T, SUCCEEDED(hr), return);
+  CHECK_HR(T, c.device->CreateShaderResourceView(tex, nullptr, &g_srv));
+  D3D11_SAMPLER_DESC sd = {};
+  sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+  sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+  CHECK_HR(T, c.device->CreateSamplerState(&sd, &g_sampler));
+
+  const UINT W = 64, H = 64;
+  auto img = draw_and_read(
+      c, W, H, kQuadFull, 6, dxbc_vs_pass, sizeof(dxbc_vs_pass), dxbc_ps_tex, sizeof(dxbc_ps_tex),
+      DXGI_FORMAT_R8G8B8A8_UNORM, extra_bind_tex
+  );
+  CHECK(T, img.size() == W * H * 4, return);
+  CHECK(T, px_eq(img, W, 16, 16, 255, 0, 0, 255, 1), log_px(img, W, 16, 16, "tl"));
+  CHECK(T, px_eq(img, W, 48, 16, 0, 255, 0, 255, 1), log_px(img, W, 48, 16, "tr"));
+  CHECK(T, px_eq(img, W, 16, 48, 0, 0, 255, 255, 1), log_px(img, W, 16, 48, "bl"));
+  CHECK(T, px_eq(img, W, 48, 48, 255, 255, 0, 255, 1), log_px(img, W, 48, 48, "br"));
+  emit("[CRC] %s.rt = 0x%08x", T, crc32_of(img.data(), img.size()));
+
+  /* Same content through the other upload paths; each draw must match the
+   * IMMUTABLE image bit-for-bit. */
+  auto ref = img;
+
+  /* UpdateSubresource on a DEFAULT texture */
+  {
+    const char *T2 = "bc1_update";
+    td.Usage = D3D11_USAGE_DEFAULT;
+    Com<ID3D11Texture2D> tex2;
+    CHECK_HR(T2, c.device->CreateTexture2D(&td, nullptr, &tex2));
+    c.ctx->UpdateSubresource(tex2, 0, nullptr, blocks, 16, 0);
+    g_srv.p->Release();
+    g_srv.p = nullptr;
+    CHECK_HR(T2, c.device->CreateShaderResourceView(tex2, nullptr, &g_srv));
+    auto img2 = draw_and_read(
+        c, W, H, kQuadFull, 6, dxbc_vs_pass, sizeof(dxbc_vs_pass), dxbc_ps_tex, sizeof(dxbc_ps_tex),
+        DXGI_FORMAT_R8G8B8A8_UNORM, extra_bind_tex
+    );
+    CHECK(T2, img2 == ref);
+  }
+
+  /* Rebind a texture as PS resource 0 and draw the reference quad. */
+  auto draw_tex = [&](ID3D11Texture2D *t) -> std::vector<uint8_t> {
+    if (g_srv.p) {
+      g_srv.p->Release();
+      g_srv.p = nullptr;
+    }
+    if (FAILED(c.device->CreateShaderResourceView(t, nullptr, &g_srv)))
+      return {};
+    return draw_and_read(
+        c, W, H, kQuadFull, 6, dxbc_vs_pass, sizeof(dxbc_vs_pass), dxbc_ps_tex, sizeof(dxbc_ps_tex),
+        DXGI_FORMAT_R8G8B8A8_UNORM, extra_bind_tex
+    );
+  };
+
+  /* STAGING texture written through Map, copied into a DEFAULT texture */
+  {
+    const char *T2 = "bc1_staging_copy";
+    D3D11_TEXTURE2D_DESC sd2 = td;
+    sd2.Usage = D3D11_USAGE_STAGING;
+    sd2.BindFlags = 0;
+    sd2.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    Com<ID3D11Texture2D> stage;
+    CHECK_HR(T2, c.device->CreateTexture2D(&sd2, nullptr, &stage));
+    D3D11_MAPPED_SUBRESOURCE map = {};
+    CHECK_HR(T2, c.ctx->Map(stage, 0, D3D11_MAP_WRITE, 0, &map));
+    /* two block rows of 2 blocks (8 bytes each) */
+    for (unsigned row = 0; row < 2; row++)
+      memcpy((char *)map.pData + row * map.RowPitch, blocks[row * 2], 16);
+    c.ctx->Unmap(stage, 0);
+    td.Usage = D3D11_USAGE_DEFAULT;
+    Com<ID3D11Texture2D> tex3;
+    CHECK_HR(T2, c.device->CreateTexture2D(&td, nullptr, &tex3));
+    c.ctx->CopyResource(tex3, stage);
+    CHECK(T2, draw_tex(tex3) == ref);
+  }
+
+  /* DYNAMIC texture created with initial data: the creation path uploads
+   * through replaceRegion, which must decompress under BC emulation. */
+  {
+    const char *T2 = "bc1_dynamic_init";
+    D3D11_TEXTURE2D_DESC dd = td;
+    dd.Usage = D3D11_USAGE_DYNAMIC;
+    dd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    dd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    Com<ID3D11Texture2D> dtex;
+    CHECK_HR(T2, c.device->CreateTexture2D(&dd, &init, &dtex));
+    CHECK(T2, draw_tex(dtex) == ref);
+  }
+
+  /* DYNAMIC texture filled through Map(WRITE_DISCARD)/Unmap. */
+  {
+    const char *T2 = "bc1_dynamic_map";
+    D3D11_TEXTURE2D_DESC dd = td;
+    dd.Usage = D3D11_USAGE_DYNAMIC;
+    dd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    dd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    Com<ID3D11Texture2D> dtex;
+    CHECK_HR(T2, c.device->CreateTexture2D(&dd, nullptr, &dtex));
+    D3D11_MAPPED_SUBRESOURCE map = {};
+    CHECK_HR(T2, c.ctx->Map(dtex, 0, D3D11_MAP_WRITE_DISCARD, 0, &map));
+    for (unsigned row = 0; row < 2; row++)
+      memcpy((char *)map.pData + row * map.RowPitch, blocks[row * 2], 16);
+    c.ctx->Unmap(dtex, 0);
+    CHECK(T2, draw_tex(dtex) == ref);
+  }
+
+  /* DYNAMIC texture written on a DEFERRED context: the Unmap must read the
+   * allocation the deferred Map handed out, not the immediate name. */
+  {
+    const char *T2 = "bc1_dynamic_deferred";
+    D3D11_TEXTURE2D_DESC dd = td;
+    dd.Usage = D3D11_USAGE_DYNAMIC;
+    dd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    dd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    Com<ID3D11Texture2D> dtex;
+    CHECK_HR(T2, c.device->CreateTexture2D(&dd, nullptr, &dtex));
+    Com<ID3D11DeviceContext> def;
+    CHECK_HR(T2, c.device->CreateDeferredContext(0, &def));
+    D3D11_MAPPED_SUBRESOURCE map = {};
+    CHECK_HR(T2, def->Map(dtex, 0, D3D11_MAP_WRITE_DISCARD, 0, &map));
+    for (unsigned row = 0; row < 2; row++)
+      memcpy((char *)map.pData + row * map.RowPitch, blocks[row * 2], 16);
+    def->Unmap(dtex, 0);
+    Com<ID3D11CommandList> cl;
+    CHECK_HR(T2, def->FinishCommandList(FALSE, &cl));
+    c.ctx->ExecuteCommandList(cl, FALSE);
+    CHECK(T2, draw_tex(dtex) == ref);
+  }
+
+  /* A staging->default copy recorded on a DEFERRED context samples the
+   * staging contents at ExecuteCommandList time, not at record time. */
+  {
+    const char *T2 = "bc1_staging_late_write";
+    D3D11_TEXTURE2D_DESC sd2 = td;
+    sd2.Usage = D3D11_USAGE_STAGING;
+    sd2.BindFlags = 0;
+    sd2.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    Com<ID3D11Texture2D> stage;
+    CHECK_HR(T2, c.device->CreateTexture2D(&sd2, nullptr, &stage));
+    td.Usage = D3D11_USAGE_DEFAULT;
+    Com<ID3D11Texture2D> dst;
+    CHECK_HR(T2, c.device->CreateTexture2D(&td, nullptr, &dst));
+    Com<ID3D11DeviceContext> def;
+    CHECK_HR(T2, c.device->CreateDeferredContext(0, &def));
+    def->CopyResource(dst, stage); /* recorded while `stage` is still empty */
+    D3D11_MAPPED_SUBRESOURCE map = {};
+    CHECK_HR(T2, c.ctx->Map(stage, 0, D3D11_MAP_WRITE, 0, &map));
+    for (unsigned row = 0; row < 2; row++)
+      memcpy((char *)map.pData + row * map.RowPitch, blocks[row * 2], 16);
+    c.ctx->Unmap(stage, 0);
+    Com<ID3D11CommandList> cl;
+    CHECK_HR(T2, def->FinishCommandList(FALSE, &cl));
+    c.ctx->ExecuteCommandList(cl, FALSE);
+    CHECK(T2, draw_tex(dst) == ref);
+  }
+
+  /* Reinterpreting upload: BC1 blocks staged as R32G32_UINT texels (one
+   * texel per block) copied into a BC1 texture -- the texture-streaming
+   * alias trick MSDN permits for CopySubresourceRegion. */
+  {
+    const char *T2 = "bc1_uint_alias_upload";
+    D3D11_TEXTURE2D_DESC ud = {};
+    ud.Width = 2;
+    ud.Height = 2;
+    ud.MipLevels = 1;
+    ud.ArraySize = 1;
+    ud.Format = DXGI_FORMAT_R32G32_UINT;
+    ud.SampleDesc = {1, 0};
+    ud.Usage = D3D11_USAGE_STAGING;
+    ud.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    Com<ID3D11Texture2D> alias;
+    CHECK_HR(T2, c.device->CreateTexture2D(&ud, nullptr, &alias));
+    D3D11_MAPPED_SUBRESOURCE map = {};
+    CHECK_HR(T2, c.ctx->Map(alias, 0, D3D11_MAP_WRITE, 0, &map));
+    for (unsigned row = 0; row < 2; row++)
+      memcpy((char *)map.pData + row * map.RowPitch, blocks[row * 2], 16);
+    c.ctx->Unmap(alias, 0);
+    td.Usage = D3D11_USAGE_DEFAULT;
+    Com<ID3D11Texture2D> dst;
+    CHECK_HR(T2, c.device->CreateTexture2D(&td, nullptr, &dst));
+    c.ctx->CopySubresourceRegion(dst, 0, 0, 0, 0, alias, 0, nullptr);
+    CHECK(T2, draw_tex(dst) == ref);
+  }
+
+  /* STAGING -> STAGING copy keeps the block layout on both sides. */
+  {
+    const char *T2 = "bc1_staging_to_staging";
+    D3D11_TEXTURE2D_DESC sd2 = td;
+    sd2.Usage = D3D11_USAGE_STAGING;
+    sd2.BindFlags = 0;
+    sd2.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    Com<ID3D11Texture2D> src;
+    CHECK_HR(T2, c.device->CreateTexture2D(&sd2, nullptr, &src));
+    D3D11_MAPPED_SUBRESOURCE map = {};
+    CHECK_HR(T2, c.ctx->Map(src, 0, D3D11_MAP_WRITE, 0, &map));
+    for (unsigned row = 0; row < 2; row++)
+      memcpy((char *)map.pData + row * map.RowPitch, blocks[row * 2], 16);
+    c.ctx->Unmap(src, 0);
+    sd2.CPUAccessFlags = D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE;
+    Com<ID3D11Texture2D> dst;
+    CHECK_HR(T2, c.device->CreateTexture2D(&sd2, nullptr, &dst));
+    c.ctx->CopyResource(dst, src);
+    CHECK_HR(T2, c.ctx->Map(dst, 0, D3D11_MAP_READ, 0, &map));
+    bool same = true;
+    for (unsigned row = 0; row < 2 && same; row++)
+      same = memcmp((char *)map.pData + row * map.RowPitch, blocks[row * 2], 16) == 0;
+    c.ctx->Unmap(dst, 0);
+    CHECK(T2, same);
+  }
+
+  /* FORMAT_SUPPORT2 must not advertise typed-UAV/atomic ops for BC formats
+   * (under emulation the stand-in's capabilities must not leak through). */
+  {
+    const char *T2 = "bc_format_support2";
+    D3D11_FEATURE_DATA_FORMAT_SUPPORT2 fs2 = {DXGI_FORMAT_BC7_UNORM, 0};
+    HRESULT hr2 = c.device->CheckFeatureSupport(D3D11_FEATURE_FORMAT_SUPPORT2, &fs2, sizeof(fs2));
+    emit("[INFO] bc7 format_support2 = 0x%08x (hr=0x%08x)", fs2.OutFormatSupport2, (unsigned)hr2);
+    const UINT uav_bits = D3D11_FORMAT_SUPPORT2_UAV_TYPED_LOAD | D3D11_FORMAT_SUPPORT2_UAV_TYPED_STORE |
+                          D3D11_FORMAT_SUPPORT2_UAV_ATOMIC_ADD | D3D11_FORMAT_SUPPORT2_UAV_ATOMIC_BITWISE_OPS |
+                          D3D11_FORMAT_SUPPORT2_UAV_ATOMIC_EXCHANGE;
+    CHECK(T2, SUCCEEDED(hr2) && (fs2.OutFormatSupport2 & uav_bits) == 0);
+  }
+
+  g_srv.p->Release();
+  g_srv.p = nullptr;
+  g_sampler.p->Release();
+  g_sampler.p = nullptr;
+}
+
+
 int
 main(int argc, char **argv) {
   g_out = stdout;
@@ -1017,6 +1297,7 @@ main(int argc, char **argv) {
   test_query_event(c);
   test_fence_event(c);
   test_srgb(c);
+  test_bc1_texture(c);
 
   emit("[SUMMARY] passed=%d failed=%d", g_passes, g_fails);
   if (g_out != stdout)

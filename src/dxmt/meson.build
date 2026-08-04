@@ -1,4 +1,5 @@
 dxmt_src = [
+  'dxmt_bc_emulation.cpp',
   'dxmt_format.cpp',
   'dxmt_names.cpp',
   'dxmt_command_queue.cpp',
