@@ -80,8 +80,8 @@ anon_shm_file(uint64_t size) {
 HRESULT
 AllocateShmLinearTexture2D(
     MTLD3D11Device *pDevice, const D3D11_TEXTURE2D_DESC1 &finalDesc, const WMTTextureInfo &info, int import_fd,
-    uint64_t import_stride, uint64_t import_size, Rc<Texture> &out_texture, Rc<TextureAllocation> &out_allocation,
-    shm_texture_pod &out_pod
+    uint64_t import_stride, uint64_t import_size, uint64_t import_offset, Rc<Texture> &out_texture,
+    Rc<TextureAllocation> &out_allocation, shm_texture_pod &out_pod
 ) {
   /* Metal linear (buffer-backed) textures: 2D, single subresource, no
    * compressed/depth formats, no MSAA.  Real shared-texture traffic is
@@ -125,7 +125,17 @@ AllocateShmLinearTexture2D(
     logical_size = bytes_per_image;
   }
 
-  const uint64_t mapped_size = page_align(logical_size);
+  /* The surface may start part-way into the object (a texture placed in a
+   * shared heap); mmap needs a page-aligned file offset, so map from the page
+   * floor and place the texture at the delta inside the buffer. */
+  const uint64_t offset = import_fd >= 0 ? import_offset : 0;
+  const uint64_t map_floor = offset & ~(page_align(1) - 1);
+  const uint64_t delta = offset - map_floor;
+  if (delta > UINT32_MAX || logical_size > UINT64_MAX - delta) {
+    ERR("shm texture: import offset out of range");
+    return E_INVALIDARG;
+  }
+  const uint64_t mapped_size = page_align(delta + logical_size);
 
   int fd = import_fd >= 0 ? import_fd : anon_shm_file(mapped_size);
   if (fd < 0) {
@@ -137,13 +147,13 @@ AllocateShmLinearTexture2D(
     /* Accessing pages past the shm object's actual size raises SIGBUS, so
      * the mapping must be backed in full. */
     struct stat st;
-    if (fstat(fd, &st) != 0 || (uint64_t)st.st_size < mapped_size) {
+    if (fstat(fd, &st) != 0 || (uint64_t)st.st_size < map_floor + mapped_size) {
       ERR("shm texture: shm object smaller than descriptor size");
       return E_INVALIDARG;
     }
   }
 
-  void *mapped = mmap(nullptr, mapped_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  void *mapped = mmap(nullptr, mapped_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)map_floor);
   if (mapped == MAP_FAILED) {
     ERR("shm texture: mmap failed: ", errno);
     if (import_fd < 0)
@@ -180,7 +190,8 @@ AllocateShmLinearTexture2D(
     flags.set(TextureAllocationFlag::ShaderReadonly);
 
   Rc<Texture> texture = new Texture((unsigned)logical_size, (unsigned)stride, linear_info, pDevice->GetMTLDevice());
-  Rc<TextureAllocation> allocation = texture->allocateFromBuffer(std::move(buffer), mapped, flags);
+  Rc<TextureAllocation> allocation =
+      texture->allocateFromBuffer(std::move(buffer), (uint8_t *)mapped + delta, (unsigned)delta, flags);
   if (!allocation->texture()) {
     ERR("shm texture: linear texture creation failed (stride=", stride, ")");
     /* buffer reference died with `allocation`; its deallocator munmaps. */
@@ -211,6 +222,7 @@ AllocateShmLinearTexture2D(
   out_pod.cpu_access = finalDesc.CPUAccessFlags;
   out_pod.stride = stride;
   out_pod.size = logical_size;
+  out_pod.offset = offset;
 
   out_texture = std::move(texture);
   out_allocation = std::move(allocation);

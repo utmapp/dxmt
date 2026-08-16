@@ -434,7 +434,7 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
       Rc<TextureAllocation> shm_allocation;
       shm_texture_pod pod;
       HRESULT hr = AllocateShmLinearTexture2D(
-          pDevice, finalDesc, info, -1, 0, 0, shm_texture, shm_allocation, pod
+          pDevice, finalDesc, info, -1, 0, 0, 0, shm_texture, shm_allocation, pod
       );
       if (FAILED(hr))
         return hr;
@@ -625,7 +625,7 @@ ImportSharedTexture(MTLD3D11Device *pDevice, HANDLE hResource, REFIID riid, void
   Rc<TextureAllocation> allocation;
   shm_texture_pod own_pod;
   HRESULT hr = AllocateShmLinearTexture2D(
-      pDevice, finalDesc, info, pod->fd, pod->stride, pod->size, texture, allocation, own_pod
+      pDevice, finalDesc, info, pod->fd, pod->stride, pod->size, pod->offset, texture, allocation, own_pod
   );
   if (FAILED(hr))
     return hr;

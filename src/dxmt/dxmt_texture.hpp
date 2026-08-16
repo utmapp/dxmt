@@ -152,8 +152,8 @@ public:
 
 private:
   TextureAllocation(
-      Texture *descriptor, WMT::Reference<WMT::Buffer> &&buffer, void *mapped_buffer, const WMTTextureInfo &info,
-      unsigned bytes_per_row, Flags<TextureAllocationFlag> flags
+      Texture *descriptor, WMT::Reference<WMT::Buffer> &&buffer, void *mapped_texture, unsigned offset,
+      const WMTTextureInfo &info, unsigned bytes_per_row, Flags<TextureAllocationFlag> flags
   );
   TextureAllocation(
       Texture *descriptor, WMT::Reference<WMT::Texture> &&texture, const WMTTextureInfo &textureDescriptor,
@@ -275,7 +275,9 @@ public:
    * the (bytes_per_image, bytes_per_row, ...) ctor).  Used by the native
    * shm-backed shared-texture path. */
   Rc<TextureAllocation>
-  allocateFromBuffer(WMT::Reference<WMT::Buffer> &&buffer, void *mapped, Flags<TextureAllocationFlag> flags);
+  allocateFromBuffer(
+      WMT::Reference<WMT::Buffer> &&buffer, void *mapped, unsigned offset, Flags<TextureAllocationFlag> flags
+  );
 
   TextureView &view(TextureViewKey key);
   TextureView &view(TextureViewKey key, TextureAllocation *allocation);

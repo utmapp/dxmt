@@ -56,15 +56,15 @@ TextureView::TextureView(TextureAllocation *allocation, unsigned index, TextureV
 }
 
 TextureAllocation::TextureAllocation(
-    Texture *descriptor, WMT::Reference<WMT::Buffer> &&buffer, void *mapped_buffer, const WMTTextureInfo &info,
-    unsigned bytes_per_row, Flags<TextureAllocationFlag> flags
+    Texture *descriptor, WMT::Reference<WMT::Buffer> &&buffer, void *mapped_texture, unsigned offset,
+    const WMTTextureInfo &info, unsigned bytes_per_row, Flags<TextureAllocationFlag> flags
 ) :
     descriptor(descriptor),
-    mappedMemory(mapped_buffer),
+    mappedMemory(mapped_texture),
     buffer_(std::move(buffer)),
     flags_(flags) {
   auto info_copy = info;
-  obj_ = buffer_.newTexture(info_copy, 0, bytes_per_row);
+  obj_ = buffer_.newTexture(info_copy, offset, bytes_per_row);
 
   gpuResourceID = info_copy.gpu_resource_id;
   machPort = 0;
@@ -197,7 +197,7 @@ Texture::allocate(Flags<TextureAllocationFlag> flags) {
     buffer_info.memory.set(wsi::aligned_malloc(bytes_per_image_, DXMT_PAGE_SIZE));
 #endif
     auto buffer = device_.newBuffer(buffer_info);
-    return new TextureAllocation(this, std::move(buffer), buffer_info.memory.get(), info, bytes_per_row_, flags);
+    return new TextureAllocation(this, std::move(buffer), buffer_info.memory.get(), 0, info, bytes_per_row_, flags);
   }
   auto texture = flags.test(TextureAllocationFlag::Shared) ? device_.newSharedTexture(info) : device_.newTexture(info);
   return new TextureAllocation(this, std::move(texture), info, flags);
@@ -205,13 +205,13 @@ Texture::allocate(Flags<TextureAllocationFlag> flags) {
 
 Rc<TextureAllocation>
 Texture::allocateFromBuffer(
-    WMT::Reference<WMT::Buffer> &&buffer, void *mapped, Flags<TextureAllocationFlag> flags
+    WMT::Reference<WMT::Buffer> &&buffer, void *mapped, unsigned offset, Flags<TextureAllocationFlag> flags
 ) {
   assert(bytes_per_image_ && "allocateFromBuffer requires the linear-texture ctor");
   WMTTextureInfo info = info_; // copy
   info.mach_port = 0;
   info.options = WMTResourceHazardTrackingModeUntracked; // StorageModeShared
-  return new TextureAllocation(this, std::move(buffer), mapped, info, bytes_per_row_, flags);
+  return new TextureAllocation(this, std::move(buffer), mapped, offset, info, bytes_per_row_, flags);
 }
 
 Rc<TextureAllocation>

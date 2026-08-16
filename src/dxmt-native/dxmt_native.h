@@ -43,7 +43,7 @@ dxmt_wait_status dxmt_event_wait(void* handle, uint64_t timeout_ns);
 /* == Cross-process shared textures ========================================= */
 
 #define DXMT_SHARED_TEXTURE_MAGIC 0x58544D44u /* 'DMTX' */
-#define DXMT_SHARED_HANDLE_VERSION 1u
+#define DXMT_SHARED_HANDLE_VERSION 2u
 
 typedef struct dxmt_shared_texture_handle {
     uint32_t magic;         /* DXMT_SHARED_TEXTURE_MAGIC */
@@ -55,6 +55,11 @@ typedef struct dxmt_shared_texture_handle {
     uint32_t bind_flags, misc_flags, cpu_access;
     uint64_t stride;        /* bytesPerRow, byte-exact for the consumer */
     uint64_t size;          /* logical stride*height (NOT page-padded) */
+    uint64_t offset;        /* byte offset of the surface within `fd`; 0 for
+                               a surface that owns its whole object, nonzero
+                               for a surface placed in a shared heap (one
+                               object backs the heap). Not necessarily
+                               page-aligned. */
 } dxmt_shared_texture_handle;
 
 #ifdef __cplusplus
