@@ -895,11 +895,22 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
 
   QueryReadbacks readbacks{};
 
-  if (auto count = vro_state_.reset()) {
+  const auto visibility_count = vro_state_.reset();
+
+  bool has_ending_visibility_query = false;
+  for (const auto &query : pending_queries_) {
+    if (query->queryEndAt() == seqId) {
+      has_ending_visibility_query = true;
+      break;
+    }
+  }
+
+  if (visibility_count || has_ending_visibility_query) {
     readbacks.visibility = std::make_unique<VisibilityResultReadback>(
-        device_, seqId, count, pending_queries_
+        device_, seqId, visibility_count, pending_queries_
     );
   }
+
   std::erase_if(pending_queries_, [=](auto &query) -> bool { return query->queryEndAt() == seqId; });
 
   readbacks.timestamp = timestamp_state_.flush(cmdbuf);

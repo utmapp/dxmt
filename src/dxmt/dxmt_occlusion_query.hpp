@@ -117,6 +117,17 @@ public:
   issue(uint64_t seqId, uint64_t const *readbackBuffer, unsigned numResults) {
     assert(seqId >= seq_id_begin);
     assert(seqId <= seq_id_end);
+
+    /*
+     * A query may span multiple command chunks and end in a chunk with
+     * no visibility-result samples. The completion-only chunk must still
+     * advance seq_id_issued once that command buffer has completed.
+     */
+    if (numResults == 0) {
+      seq_id_issued = seqId;
+      return;
+    }
+
     uint64_t const *start = seqId == seq_id_begin ? readbackBuffer + occlusion_counter_begin : readbackBuffer;
     uint64_t const *end = seqId == seq_id_end ? readbackBuffer + occlusion_counter_end : readbackBuffer + numResults;
     assert(start <= end);
@@ -167,10 +178,12 @@ public:
         visibility_result_heap_info.options = WMTResourceHazardTrackingModeUntracked;
         visibility_result_heap_info.memory.set(nullptr);
 #ifdef __i386__
-        visibility_result_heap_info.memory.set(wsi::aligned_malloc(num_results * sizeof(uint64_t), DXMT_PAGE_SIZE));
+        if (num_results)
+          visibility_result_heap_info.memory.set(wsi::aligned_malloc(num_results * sizeof(uint64_t), DXMT_PAGE_SIZE));
 #endif
         visibility_result_heap_info.length = num_results * sizeof(uint64_t);
-        visibility_result_heap = device.newBuffer(visibility_result_heap_info);
+        if (num_results)
+          visibility_result_heap = device.newBuffer(visibility_result_heap_info);
       }
   ~VisibilityResultReadback() {
     for (auto query : queries) {
