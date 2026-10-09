@@ -34,7 +34,10 @@ extern "C" {
 void *dxmt_event_create(int manual_reset, int initial_state);
 void dxmt_event_close(void *);
 int dxmt_event_wait(void *, uint64_t timeout_ns);
+int32_t dxmt_d3d11_buffer_bind_external_fd(void *, int fd, uint64_t backing_length, uint32_t cookie);
+int dxmt_d3d11_buffer_external_cookie(void *, void *mapped_ptr, uint32_t *out_cookie);
 }
+#include <sys/mman.h>
 
 static FILE *g_out = nullptr;
 static int g_fails = 0;
@@ -1261,6 +1264,120 @@ test_bc1_texture(Ctx &c) {
 }
 
 
+/* Embedder-shared DYNAMIC buffer storage (dxmt_d3d11_buffer_bind_external_fd):
+ * Map(WRITE_DISCARD) renames onto the shared allocations, the GPU reads what
+ * was written through the embedder's own mapping, NO_OVERWRITE stays on the
+ * current allocation, a DISCARD with no shared allocation free still succeeds
+ * on device memory (no cookie), and that device memory is not reused once the
+ * buffer has shared allocations. */
+static void
+test_dynamic_external(Ctx &c) {
+  const char *T = "dynamic_external";
+  const UINT N = 1u << 20;
+  auto make_shm = [&](void **mapping) -> int {
+    char name[64];
+    snprintf(name, sizeof(name), "/dxmt-test-%d-%x", getpid(), (unsigned)arc4random());
+    int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
+    if (fd < 0)
+      return -1;
+    shm_unlink(name);
+    if (ftruncate(fd, N) != 0) {
+      close(fd);
+      return -1;
+    }
+    *mapping = mmap(nullptr, N, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (*mapping == MAP_FAILED) {
+      close(fd);
+      return -1;
+    }
+    return fd;
+  };
+  std::vector<uint8_t> pattern(N), pattern2(N);
+  for (UINT i = 0; i < N; i++) {
+    pattern[i] = (uint8_t)(i * 2654435761u >> 13);
+    pattern2[i] = (uint8_t)(i * 40503u >> 7);
+  }
+
+  D3D11_BUFFER_DESC bd = {};
+  bd.ByteWidth = N;
+  bd.Usage = D3D11_USAGE_DYNAMIC;
+  bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+  bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+  Com<ID3D11Buffer> dbuf;
+  CHECK_HR(T, c.device->CreateBuffer(&bd, nullptr, &dbuf));
+
+  void *shm0 = nullptr, *shm1 = nullptr;
+  int fd0 = make_shm(&shm0), fd1 = make_shm(&shm1);
+  CHECK(T, fd0 >= 0 && fd1 >= 0);
+  if (fd0 < 0 || fd1 < 0)
+    return;
+
+  auto map = [&](D3D11_MAP type, D3D11_MAPPED_SUBRESOURCE &m) -> uint32_t {
+    uint32_t cookie = ~0u;
+    if (FAILED(c.ctx->Map(dbuf, 0, type, 0, &m)))
+      return 0xbad;
+    if (dxmt_d3d11_buffer_external_cookie(dbuf, m.pData, &cookie) != 0)
+      cookie = ~0u;
+    return cookie;
+  };
+  D3D11_MAPPED_SUBRESOURCE m = {};
+
+  /* Before any bind the buffer renames onto device memory. */
+  CHECK(T, map(D3D11_MAP_WRITE_DISCARD, m) == ~0u);
+  memcpy(m.pData, pattern.data(), N);
+  c.ctx->Unmap(dbuf, 0);
+
+  CHECK_HR(T, (HRESULT)dxmt_d3d11_buffer_bind_external_fd(dbuf, fd0, N, 7));
+  CHECK_HR(T, (HRESULT)dxmt_d3d11_buffer_bind_external_fd(dbuf, fd1, N, 9));
+  auto rb = readback_buffer(c, dbuf);
+  CHECK(T, rb == pattern);
+
+  /* The next rename takes the first queued shared allocation; the GPU reads
+   * what the Map wrote, which is the embedder's mapping. */
+  CHECK(T, map(D3D11_MAP_WRITE_DISCARD, m) == 7);
+  memcpy(m.pData, pattern2.data(), N);
+  c.ctx->Unmap(dbuf, 0);
+  CHECK(T, memcmp(shm0, pattern2.data(), N) == 0);
+  rb = readback_buffer(c, dbuf);
+  CHECK(T, rb == pattern2);
+
+  /* NO_OVERWRITE stays on it; a write through the embedder's mapping alone
+   * reaches the GPU. */
+  CHECK(T, map(D3D11_MAP_WRITE_NO_OVERWRITE, m) == 7);
+  c.ctx->Unmap(dbuf, 0);
+  memcpy(shm0, pattern.data(), N / 2);
+  rb = readback_buffer(c, dbuf);
+  CHECK(T, memcmp(rb.data(), pattern.data(), N / 2) == 0 && memcmp(rb.data() + N / 2, pattern2.data() + N / 2, N / 2) == 0);
+
+  /* Every command buffer has completed: the free device-memory allocation
+   * is dropped rather than reused, so the rename takes the other shared one. */
+  CHECK(T, map(D3D11_MAP_WRITE_DISCARD, m) == 9);
+  c.ctx->Unmap(dbuf, 0);
+
+  /* Nothing completed since: no shared allocation is free, and the Map
+   * still succeeds on device memory, which carries no cookie. */
+  CHECK(T, map(D3D11_MAP_WRITE_DISCARD, m) == ~0u);
+  memcpy(m.pData, pattern.data(), N);
+  c.ctx->Unmap(dbuf, 0);
+  rb = readback_buffer(c, dbuf);
+  CHECK(T, rb == pattern);
+
+  /* Both shared allocations are free again and come back in rename order. */
+  CHECK(T, map(D3D11_MAP_WRITE_DISCARD, m) == 7);
+  c.ctx->Unmap(dbuf, 0);
+  CHECK(T, map(D3D11_MAP_WRITE_DISCARD, m) == 9);
+  c.ctx->Unmap(dbuf, 0);
+
+  /* Rejections: a backing too small for the buffer, and an unaligned one. */
+  CHECK(T, dxmt_d3d11_buffer_bind_external_fd(dbuf, fd0, N / 2, 11) != 0);
+  CHECK(T, dxmt_d3d11_buffer_bind_external_fd(dbuf, fd0, N - 1, 11) != 0);
+
+  munmap(shm0, N);
+  munmap(shm1, N);
+  close(fd0);
+  close(fd1);
+}
+
 int
 main(int argc, char **argv) {
   g_out = stdout;
@@ -1302,6 +1419,7 @@ main(int argc, char **argv) {
   test_device_info(c);
   test_format_support(c);
   test_buffer_roundtrip(c);
+  test_dynamic_external(c);
   test_texture_roundtrip(c);
   test_draw_basic(c);
   test_compat_shapes(c);

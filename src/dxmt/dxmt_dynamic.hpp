@@ -11,6 +11,15 @@ public:
   void decRef();
 
   Rc<BufferAllocation> allocate(uint64_t coherent_seq_id);
+  /* Queue an external allocation for allocate() to hand out before it
+   * would create a new internal one.  From then on, internal allocations
+   * that come back free are dropped instead of reused, so renames keep
+   * landing on external ones. */
+  void addExternal(Rc<BufferAllocation> &&allocation);
+  Flags<BufferAllocationFlag>
+  allocationFlags() const {
+    return flags_;
+  }
   void updateImmediateName(uint64_t current_seq_id, Rc<BufferAllocation> &&allocation, uint32_t suballocation, bool owned_by_command_list);
   void recycle(uint64_t current_seq_id, Rc<BufferAllocation> &&allocation);
   uint32_t nextSuballocation();
@@ -46,6 +55,8 @@ private:
   Flags<BufferAllocationFlag> flags_;
   std::atomic<uint32_t> refcount_ = {0u};
   std::queue<QueueEntry> fifo;
+  std::queue<Rc<BufferAllocation>> fresh_external_;
+  bool external_mode_ = false;
   dxmt::mutex mutex_;
   Rc<BufferAllocation> name_;
   uint32_t name_suballocation_ = 0;

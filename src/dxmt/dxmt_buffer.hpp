@@ -26,6 +26,7 @@
 #include "thread.hpp"
 #include "util_flags.hpp"
 #include "util_svector.hpp"
+#include <memory>
 
 namespace dxmt {
 
@@ -71,6 +72,18 @@ struct BufferViewDescriptor {
 };
 
 class Buffer;
+
+/* Guest-shared backing of an external BufferAllocation: a dup of the
+ * embedder's fd and this process's mapping of it.  Released after the
+ * MTLBuffer over it, so the pages outlive every GPU reference. */
+struct ExternalBufferBacking {
+  int fd = -1;
+  void *mapping = nullptr;
+  uint64_t length = 0;
+
+  ExternalBufferBacking(int fd, void *mapping, uint64_t length) : fd(fd), mapping(mapping), length(length) {}
+  ~ExternalBufferBacking();
+};
 
 struct BufferView {
   WMT::Reference<WMT::Texture> texture;
@@ -133,6 +146,13 @@ public:
     return current_suballocation_;
   }
 
+  /* Embedder cookie of an external allocation; kNoExternalCookie otherwise. */
+  static constexpr uint32_t kNoExternalCookie = ~0u;
+  uint32_t
+  externalCookie() const noexcept {
+    return external_cookie_;
+  }
+
   void
   updateContents(uint64_t offset, const void *data, uint64_t length, uint32_t suballocation = 0) noexcept {
     if (likely(mappedMemory_ != nullptr && !flags_.test(BufferAllocationFlag::GpuManaged))) {
@@ -152,6 +172,9 @@ private:
   BufferAllocation(const BufferAllocation &) = delete;
   BufferAllocation(BufferAllocation &&) = delete;
 
+  /* Before obj_: destroyed after it, so the mapping outlives the MTLBuffer. */
+  std::unique_ptr<ExternalBufferBacking> external_backing_;
+  uint32_t external_cookie_ = kNoExternalCookie;
   WMT::Reference<WMT::Buffer> obj_;
   WMTBufferInfo info_;
   uint32_t version_ = 0;
@@ -179,6 +202,12 @@ public:
   }
 
   Rc<BufferAllocation> allocate(Flags<BufferAllocationFlag> flags);
+
+  /* An allocation whose storage is the embedder's shared memory fd (mapped
+   * here, wrapped as a no-copy MTLBuffer) instead of fresh device memory.
+   * backing_length must cover the buffer and be page aligned.  Empty on
+   * failure, and for CpuInvisible flags, which have no CPU storage to share. */
+  Rc<BufferAllocation> allocateExternal(int fd, uint64_t backing_length, Flags<BufferAllocationFlag> flags, uint32_t cookie);
 
   Rc<BufferAllocation> rename(Rc<BufferAllocation> &&newAllocation);
 

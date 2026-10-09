@@ -30,13 +30,28 @@ DynamicBuffer::allocate(uint64_t coherent_seq_id) {
     if (entry.will_free_at > coherent_seq_id) {
       break;
     }
-    ret = std::move(entry.allocation);
     fifo.pop();
+    if (external_mode_ && entry.allocation->externalCookie() == BufferAllocation::kNoExternalCookie)
+      continue;
+    ret = std::move(entry.allocation);
     break;
+  }
+  if (!ret.ptr() && !fresh_external_.empty()) {
+    ret = std::move(fresh_external_.front());
+    fresh_external_.pop();
   }
   if (!ret.ptr())
     ret = buffer->allocate(flags_);
   return ret;
+}
+
+void
+DynamicBuffer::addExternal(Rc<BufferAllocation> &&allocation) {
+  std::lock_guard<dxmt::mutex> lock(mutex_);
+  if (allocation.ptr()) {
+    fresh_external_.push(std::move(allocation));
+    external_mode_ = true;
+  }
 }
 
 void

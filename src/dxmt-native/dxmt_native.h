@@ -40,6 +40,23 @@ void  dxmt_event_close(void* handle);
 int   dxmt_event_dup_fd(void* handle);
 dxmt_wait_status dxmt_event_wait(void* handle, uint64_t timeout_ns);
 
+/* == Embedder-shared DYNAMIC buffer storage ================================ */
+
+/* Make the embedder's shared memory fd (its guest's mapping) the storage of
+ * one rename allocation of a DYNAMIC ID3D11Buffer, so a guest Map writes
+ * the bytes the GPU reads with no host copy.  backing_length must cover the
+ * buffer and be page aligned.  The fd is dup'ed; the caller keeps its own.
+ * The allocation is tagged with cookie, which the embedder's Map path reads
+ * back through dxmt_d3d11_buffer_external_cookie, and queues for a later
+ * Map(WRITE_DISCARD) rename.  Once a buffer has one, renames stop reusing
+ * its ordinary device-memory allocations; a Map that finds no shared
+ * allocation free still succeeds on new device memory, with no cookie. */
+int32_t dxmt_d3d11_buffer_bind_external_fd(void *d3d11_buffer, int fd, uint64_t backing_length,
+                                           uint32_t cookie);
+/* 0 and the cookie if mapped_ptr (from ID3D11DeviceContext::Map) is a shared
+ * allocation of that buffer, -1 if it is ordinary device memory. */
+int dxmt_d3d11_buffer_external_cookie(void *d3d11_buffer, void *mapped_ptr, uint32_t *out_cookie);
+
 /* == Cross-process shared textures ========================================= */
 
 #define DXMT_SHARED_TEXTURE_MAGIC 0x58544D44u /* 'DMTX' */

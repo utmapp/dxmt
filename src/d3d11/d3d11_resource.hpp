@@ -131,6 +131,15 @@ struct D3D11ResourceCommon : ID3D11Resource {
 
   virtual Rc<StagingResource> staging(UINT Subresource) = 0;
   virtual Rc<DynamicBuffer> dynamicBuffer(UINT *pBufferLength, UINT *pBindFlags) = 0;
+  /* Embedder-shared backing for a DYNAMIC buffer (dxmt_native.h). */
+  virtual HRESULT
+  bindDynamicBufferExternalFd(int fd, uint64_t backing_length, uint32_t cookie) {
+    return E_NOTIMPL;
+  }
+  virtual bool
+  dynamicBufferExternalCookie(void *mapped_ptr, uint32_t *out_cookie) {
+    return false;
+  }
   virtual Rc<DynamicLinearTexture> dynamicLinearTexture(UINT *pBytesPerRow, UINT *pBytesPerImage) = 0;
   virtual Rc<DynamicBuffer> dynamicTexture(UINT Subresource, UINT *pBytesPerRow, UINT *pBytesPerImage) = 0;
 

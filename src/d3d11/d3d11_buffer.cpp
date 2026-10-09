@@ -23,6 +23,9 @@
 #include "dxmt_format.hpp"
 #include "d3d11_resource.hpp"
 
+#include <mutex>
+#include <unordered_map>
+
 namespace dxmt {
 
 struct BufferViewInfo {
@@ -42,6 +45,10 @@ private:
   bool allow_raw_view;
 
   Rc<DynamicBuffer> dynamic_;
+  /* Mapped pointer -> cookie of each external allocation; an allocation
+   * lives as long as the buffer, so entries are never removed. */
+  std::mutex external_mutex_;
+  std::unordered_map<void *, uint32_t> external_cookies_;
 
   using SRVBase = TResourceViewBase<tag_shader_resource_view<D3D11Buffer>>;
 
@@ -136,6 +143,34 @@ public:
     *pBufferLength = desc.ByteWidth;
     *pBindFlags = desc.BindFlags;
     return dynamic_;
+  }
+
+  HRESULT
+  bindDynamicBufferExternalFd(int fd, uint64_t backing_length, uint32_t cookie) override {
+    if (!dynamic_.ptr())
+      return E_NOTIMPL;
+    if (fd < 0 || backing_length < desc.ByteWidth || cookie == BufferAllocation::kNoExternalCookie)
+      return E_INVALIDARG;
+    auto allocation = buffer_->allocateExternal(fd, backing_length, dynamic_->allocationFlags(), cookie);
+    if (!allocation.ptr())
+      return E_OUTOFMEMORY;
+    void *mapped = allocation->mappedMemory(0);
+    dynamic_->addExternal(std::move(allocation));
+    std::lock_guard<std::mutex> lock(external_mutex_);
+    external_cookies_[mapped] = cookie;
+    return S_OK;
+  }
+
+  bool
+  dynamicBufferExternalCookie(void *mapped_ptr, uint32_t *out_cookie) override {
+    if (!mapped_ptr || !out_cookie)
+      return false;
+    std::lock_guard<std::mutex> lock(external_mutex_);
+    auto it = external_cookies_.find(mapped_ptr);
+    if (it == external_cookies_.end())
+      return false;
+    *out_cookie = it->second;
+    return true;
   }
   Rc<DynamicLinearTexture>
   dynamicLinearTexture(UINT *, UINT *) final {

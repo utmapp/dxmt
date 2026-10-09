@@ -29,3 +29,5 @@ _dxmt_event_clear
 _dxmt_event_close
 _dxmt_event_dup_fd
 _dxmt_event_wait
+_dxmt_d3d11_buffer_bind_external_fd
+_dxmt_d3d11_buffer_external_cookie

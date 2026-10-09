@@ -24,10 +24,23 @@
 #include "wsi_platform.hpp"
 #include <cassert>
 #include <mutex>
+#ifdef __APPLE__
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
 
 namespace dxmt {
 
 std::atomic_uint64_t global_buffer_seq = {0};
+
+ExternalBufferBacking::~ExternalBufferBacking() {
+#ifdef __APPLE__
+  if (mapping && mapping != MAP_FAILED)
+    munmap(mapping, length);
+  if (fd >= 0)
+    close(fd);
+#endif
+}
 
 BufferAllocation::BufferAllocation(WMT::Device device, const WMTBufferInfo &info, Flags<BufferAllocationFlag> flags) :
     info_(info),
@@ -166,6 +179,59 @@ Buffer::allocate(Flags<BufferAllocationFlag> flags) {
   info.options = options;
   return new BufferAllocation(device_, info, flags);
 };
+
+Rc<BufferAllocation>
+Buffer::allocateExternal(int fd, uint64_t backing_length, Flags<BufferAllocationFlag> flags, uint32_t cookie) {
+#ifndef __APPLE__
+  (void)fd;
+  (void)backing_length;
+  (void)flags;
+  (void)cookie;
+  return {};
+#else
+  const uint64_t page = (uint64_t)getpagesize();
+  if (fd < 0 || backing_length < length_ || (backing_length & (page - 1)) ||
+      flags.test(BufferAllocationFlag::CpuInvisible))
+    return {};
+
+  int owned_fd = dup(fd);
+  if (owned_fd < 0)
+    return {};
+  void *mapping = mmap(nullptr, backing_length, PROT_READ | PROT_WRITE, MAP_SHARED, owned_fd, 0);
+  if (mapping == MAP_FAILED) {
+    close(owned_fd);
+    return {};
+  }
+
+  WMTResourceOptions options = WMTResourceHazardTrackingModeUntracked;
+  if (flags.test(BufferAllocationFlag::CpuWriteCombined))
+    options |= WMTResourceOptionCPUCacheModeWriteCombined;
+  if (flags.test(BufferAllocationFlag::GpuManaged))
+    options |= WMTResourceStorageModeManaged;
+
+  WMTBufferInfo info;
+  info.memory.set(mapping);
+  info.length = backing_length;
+  info.options = options;
+
+  /* The constructor would replace the shared mapping (CpuPlaced) or shrink
+   * the allocation to one page (SuballocateFromOnePage). */
+  flags.clr(BufferAllocationFlag::CpuPlaced, BufferAllocationFlag::SuballocateFromOnePage);
+  Rc<BufferAllocation> allocation = new BufferAllocation(device_, info, flags);
+  if (allocation->buffer().handle == NULL_OBJECT_HANDLE) {
+    munmap(mapping, backing_length);
+    close(owned_fd);
+    return {};
+  }
+  allocation->external_backing_ = std::make_unique<ExternalBufferBacking>(owned_fd, mapping, backing_length);
+  allocation->external_cookie_ = cookie;
+  /* One logical buffer per shared allocation: no page suballocation. */
+  allocation->suballocation_size_ = length_;
+  allocation->suballocation_count_ = 1;
+  allocation->fenceTrackers.resize(1);
+  return allocation;
+#endif
+}
 
 Rc<BufferAllocation>
 Buffer::rename(Rc<BufferAllocation> &&newAllocation) {
