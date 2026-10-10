@@ -450,6 +450,114 @@ static const Vertex kQuadFull[6] = {
     {{-1, -1}, {0, 1}, {1, 1, 1, 1}}, {{1, 1}, {1, 0}, {1, 1, 1, 1}},  {{1, -1}, {1, 1}, {1, 1, 1, 1}},
 };
 
+/* UpdateSubresource into STAGING resources (legal per MSDN: only IMMUTABLE and
+ * DYNAMIC destinations are excluded): full and boxed writes to a buffer, an
+ * RGBA8 2D texture (padded source pitch, a mip), a BC1 texture (block box) and
+ * a 3D texture, each read back with Map(READ). */
+static void
+test_staging_update(Ctx &c) {
+  const char *T = "staging_update";
+  /* buffer */
+  {
+    const UINT N = 4096;
+    std::vector<uint8_t> zero(N, 0), pat(N), pat2(200);
+    for (UINT i = 0; i < N; i++) pat[i] = (uint8_t)(i * 7 + 1);
+    for (UINT i = 0; i < 200; i++) pat2[i] = (uint8_t)(0xa0 ^ i);
+    D3D11_BUFFER_DESC bd = {N, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE, 0, 0};
+    D3D11_SUBRESOURCE_DATA init = {zero.data(), 0, 0};
+    Com<ID3D11Buffer> sb;
+    CHECK_HR(T, c.device->CreateBuffer(&bd, &init, &sb));
+    c.ctx->UpdateSubresource(sb, 0, nullptr, pat.data(), 0, 0);
+    D3D11_BOX box = {100, 0, 0, 300, 1, 1};
+    c.ctx->UpdateSubresource(sb, 0, &box, pat2.data(), 0, 0);
+    std::vector<uint8_t> want = pat;
+    memcpy(want.data() + 100, pat2.data(), 200);
+    D3D11_MAPPED_SUBRESOURCE m = {};
+    CHECK_HR(T, c.ctx->Map(sb, 0, D3D11_MAP_READ, 0, &m));
+    CHECK(T, memcmp(m.pData, want.data(), N) == 0);
+    c.ctx->Unmap(sb, 0);
+  }
+  /* RGBA8 2D, two mips */
+  {
+    const UINT W = 64, H = 32, SP = W * 4 + 16;
+    D3D11_TEXTURE2D_DESC td = {W, H, 2, 1, DXGI_FORMAT_R8G8B8A8_UNORM, {1, 0}, D3D11_USAGE_STAGING, 0,
+                               D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE, 0};
+    Com<ID3D11Texture2D> st;
+    CHECK_HR(T, c.device->CreateTexture2D(&td, nullptr, &st));
+    std::vector<uint8_t> src(SP * H, 0xee);
+    for (UINT y = 0; y < H; y++)
+      for (UINT x = 0; x < W * 4; x++) src[y * SP + x] = (uint8_t)(x + y * 3);
+    c.ctx->UpdateSubresource(st, 0, nullptr, src.data(), SP, 0);
+    /* mip 1 (32x16): zero it, then write the box (8,4)-(24,12) */
+    std::vector<uint8_t> z1(32 * 16 * 4, 0), b1(16 * 8 * 4);
+    for (UINT i = 0; i < b1.size(); i++) b1[i] = (uint8_t)(0x55 + i);
+    c.ctx->UpdateSubresource(st, 1, nullptr, z1.data(), 32 * 4, 0);
+    D3D11_BOX box = {8, 4, 0, 24, 12, 1};
+    c.ctx->UpdateSubresource(st, 1, &box, b1.data(), 16 * 4, 0);
+    D3D11_MAPPED_SUBRESOURCE m = {};
+    CHECK_HR(T, c.ctx->Map(st, 0, D3D11_MAP_READ, 0, &m));
+    bool ok = true;
+    for (UINT y = 0; y < H && ok; y++)
+      ok = memcmp((const uint8_t *)m.pData + y * m.RowPitch, src.data() + y * SP, W * 4) == 0;
+    CHECK(T, ok);
+    c.ctx->Unmap(st, 0);
+    CHECK_HR(T, c.ctx->Map(st, 1, D3D11_MAP_READ, 0, &m));
+    ok = true;
+    for (UINT y = 0; y < 16 && ok; y++)
+      for (UINT x = 0; x < 32 && ok; x++) {
+        const uint8_t *p = (const uint8_t *)m.pData + y * m.RowPitch + x * 4;
+        bool in = x >= 8 && x < 24 && y >= 4 && y < 12;
+        const uint8_t *e = in ? &b1[((y - 4) * 16 + (x - 8)) * 4] : &z1[0];
+        ok = memcmp(p, e, 4) == 0;
+      }
+    CHECK(T, ok);
+    c.ctx->Unmap(st, 1);
+  }
+  /* BC1 16x16: write the 2x2-block box at (4,4)-(12,12) */
+  {
+    D3D11_TEXTURE2D_DESC td = {16, 16, 1, 1, DXGI_FORMAT_BC1_UNORM, {1, 0}, D3D11_USAGE_STAGING, 0,
+                               D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE, 0};
+    Com<ID3D11Texture2D> st;
+    CHECK_HR(T, c.device->CreateTexture2D(&td, nullptr, &st));
+    std::vector<uint8_t> z(4 * 8 * 4, 0), blk(2 * 8 * 2);
+    for (UINT i = 0; i < blk.size(); i++) blk[i] = (uint8_t)(0x31 + i);
+    c.ctx->UpdateSubresource(st, 0, nullptr, z.data(), 4 * 8, 0);
+    D3D11_BOX box = {4, 4, 0, 12, 12, 1};
+    c.ctx->UpdateSubresource(st, 0, &box, blk.data(), 2 * 8, 0);
+    D3D11_MAPPED_SUBRESOURCE m = {};
+    CHECK_HR(T, c.ctx->Map(st, 0, D3D11_MAP_READ, 0, &m));
+    bool ok = true;
+    for (UINT by = 0; by < 4 && ok; by++)
+      for (UINT bx = 0; bx < 4 && ok; bx++) {
+        const uint8_t *p = (const uint8_t *)m.pData + by * m.RowPitch + bx * 8;
+        bool in = bx >= 1 && bx < 3 && by >= 1 && by < 3;
+        ok = in ? memcmp(p, &blk[((by - 1) * 2 + (bx - 1)) * 8], 8) == 0 : memcmp(p, z.data(), 8) == 0;
+      }
+    CHECK(T, ok);
+    c.ctx->Unmap(st, 0);
+  }
+  /* RGBA8 3D 4x4x3 with a depth pitch */
+  {
+    D3D11_TEXTURE3D_DESC td = {4, 4, 3, 1, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_USAGE_STAGING, 0,
+                               D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE, 0};
+    Com<ID3D11Texture3D> st;
+    CHECK_HR(T, c.device->CreateTexture3D(&td, nullptr, &st));
+    const UINT RP = 4 * 4, DP = RP * 4 + 32;
+    std::vector<uint8_t> src(DP * 3, 0xcc);
+    for (UINT z = 0; z < 3; z++)
+      for (UINT i = 0; i < RP * 4; i++) src[z * DP + i] = (uint8_t)(z * 64 + i);
+    c.ctx->UpdateSubresource(st, 0, nullptr, src.data(), RP, DP);
+    D3D11_MAPPED_SUBRESOURCE m = {};
+    CHECK_HR(T, c.ctx->Map(st, 0, D3D11_MAP_READ, 0, &m));
+    bool ok = true;
+    for (UINT z = 0; z < 3 && ok; z++)
+      for (UINT y = 0; y < 4 && ok; y++)
+        ok = memcmp((const uint8_t *)m.pData + z * m.DepthPitch + y * m.RowPitch, src.data() + z * DP + y * RP, RP) == 0;
+    CHECK(T, ok);
+    c.ctx->Unmap(st, 0);
+  }
+}
+
 static void
 test_draw_basic(Ctx &c) {
   const char *T = "draw_basic";
@@ -1421,6 +1529,7 @@ main(int argc, char **argv) {
   test_buffer_roundtrip(c);
   test_dynamic_external(c);
   test_texture_roundtrip(c);
+  test_staging_update(c);
   test_draw_basic(c);
   test_compat_shapes(c);
   test_draw_deferred(c);

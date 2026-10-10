@@ -1221,11 +1221,25 @@ public:
         }
       }
       if (auto staging = GetStagingResource(pDstResource, DstSubresource); unlikely(staging)) {
-        // Per MSDN: The CPU copies data from memory to a subresource created in non-mappable memory.
-        // Also MSDN: A resource cannot be used as a destination if: the resource is created with immutable or
-        // dynamic usage.
-        // So it's legal?
-        UNIMPLEMENTED("update buffer: staging");
+        /* MSDN excludes only IMMUTABLE and DYNAMIC destinations, so a STAGING
+         * one is legal; order the write with the rest of the GPU timeline by
+         * blitting it into the staging buffer, like a copy into staging */
+        auto [upload, upload_offset] = AllocateStagingBuffer(copy_len, 16);
+        upload.updateContents(upload_offset, pSrcData, copy_len);
+        SwitchToBlitEncoder(CommandBufferState::UpdateBlitEncoderActive);
+        UseCopyDestination(staging);
+        EmitOP([upload, upload_offset, dst_ = std::move(staging), copy_offset,
+                copy_len](ArgumentEncodingContext &enc) {
+          auto [dst, dst_offset] = enc.access(dst_->buffer(), copy_offset, copy_len, ResourceAccess::Write);
+          auto &cmd = enc.encodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
+          cmd.type = WMTBlitCommandCopyFromBufferToBuffer;
+          cmd.copy_length = copy_len;
+          cmd.src = upload;
+          cmd.src_offset = upload_offset;
+          cmd.dst = dst->buffer();
+          cmd.dst_offset = copy_offset + dst_offset;
+        });
+        promote_flush = true;
       } else if (auto bindable = GetResourceCommon(pDstResource)) {
         auto [staging_buffer, offset] = AllocateStagingBuffer(copy_len, 16);
         staging_buffer.updateContents(offset, pSrcData, copy_len);
@@ -4541,8 +4555,38 @@ public:
         cmd_cptex.origin = cmd.DstOrigin;
       });
     } else if (auto staging_dst = GetStagingResource(cmd.pDst, cmd.DstSubresource)) {
-      // staging: ...
-      UNIMPLEMENTED("update texture: staging");
+      /* A STAGING texture is a buffer in D3D's own layout (block rows for BC,
+       * also under BC emulation): pack the rows, then blit each one to its
+       * place, ordered like any other copy into staging */
+      const uint32_t row_bytes = cmd.EffectiveBytesPerRow, rows = cmd.EffectiveRows, depth = cmd.DstSize.depth;
+      const bool bc = cmd.DstFormat.Flag & MTL_DXGI_FORMAT_BC;
+      const uint32_t dst_x = (bc ? cmd.DstOrigin.x >> 2 : cmd.DstOrigin.x) * cmd.DstFormat.BytesPerTexel;
+      const uint32_t dst_y = bc ? cmd.DstOrigin.y >> 2 : cmd.DstOrigin.y;
+      auto [upload, upload_offset] = AllocateStagingBuffer(row_bytes * rows * depth, 16);
+      for (uint32_t z = 0; z < depth; z++)
+        for (uint32_t row = 0; row < rows; row++)
+          upload.updateContents(
+              upload_offset + (z * rows + row) * row_bytes,
+              (const char *)pSrcData + z * SrcDepthPitch + row * SrcRowPitch, row_bytes
+          );
+      SwitchToBlitEncoder(CommandBufferState::UpdateBlitEncoderActive);
+      UseCopyDestination(staging_dst);
+      EmitOP([upload, upload_offset, dst_ = std::move(staging_dst), row_bytes, rows, depth, dst_x, dst_y,
+              dst_z = cmd.DstOrigin.z](ArgumentEncodingContext &enc) {
+        auto [dst, dst_sub_offset] = enc.access(dst_->buffer(), 0, dst_->length, ResourceAccess::Write);
+        for (uint32_t z = 0; z < depth; z++) {
+          for (uint32_t row = 0; row < rows; row++) {
+            auto &cp = enc.encodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
+            cp.type = WMTBlitCommandCopyFromBufferToBuffer;
+            cp.copy_length = row_bytes;
+            cp.src = upload;
+            cp.src_offset = upload_offset + (z * rows + row) * row_bytes;
+            cp.dst = dst->buffer();
+            cp.dst_offset = dst_sub_offset + (dst_z + z) * dst_->bytesPerImage + (dst_y + row) * dst_->bytesPerRow + dst_x;
+          }
+        }
+      });
+      promote_flush = true;
     } else {
       UNREACHABLE
     }
