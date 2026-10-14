@@ -2698,24 +2698,25 @@ _SharedEventListener_destroy(void *obj) {
 
 #else
 
-#include "dxmt_native_event.h"
+#include <directx-native/dxn_event.h>
 
-/* Native: the HANDLE is a dxmt_native_event (see dxmt_native_event.h) created
- * by the embedder and handed to ID3D11Fence::SetEventOnCompletion.  The
- * embedder may close the HANDLE before the GPU reaches the value (its waiter
- * only holds the exported fd), so the block must not capture the HANDLE —
- * take a reference on the shared core now and signal+release through it. */
+/* Native: the HANDLE is a directx-native event (dxn_event.h) created by the
+ * embedder and handed to ID3D11Fence::SetEventOnCompletion.  The embedder may
+ * close the HANDLE before the GPU reaches the value (its waiter only holds
+ * the exported fd), so the block must not capture the HANDLE — pin the event
+ * with a duplicate now and signal+close through that. */
 static NTSTATUS
 _MTLSharedEvent_setWin32EventAtValue(void *obj) {
   struct unixcall_mtlsharedevent_setevent *params = obj;
-  struct dxmt_evt_core *core = dxmt_evt_core_retain((void *)params->event_handle);
-  if (!core)
+  void *pinned = dxn_event_duplicate((void *)params->event_handle);
+  if (!pinned)
     return STATUS_SUCCESS;
   [(id<MTLSharedEvent>)params->shared_event
       notifyListener:(MTLSharedEventListener *)params->shared_event_listener
              atValue:params->value
                block:^(id<MTLSharedEvent> _e, uint64_t _v) {
-                 dxmt_evt_core_signal_release(core);
+                 dxn_event_signal(pinned);
+                 dxn_event_close(pinned);
                }];
   return STATUS_SUCCESS;
 }

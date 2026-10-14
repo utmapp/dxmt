@@ -166,7 +166,7 @@ public:
 
   ~DeviceTexture() {
 #ifndef _WIN32
-    if (shm_pod_.magic == DXMT_SHARED_TEXTURE_MAGIC && shm_pod_.fd >= 0)
+    if (shm_pod_.magic == DXN_SHARED_TEXTURE_MAGIC && shm_pod_.fd >= 0)
       close(shm_pod_.fd);
 #endif
     if (local_kmt_) {
@@ -316,7 +316,7 @@ public:
 #ifndef _WIN32
     /* Legacy-handle semantics: the same POD pointer every call, valid for
      * the texture's lifetime, never closed by the caller. */
-    if (shm_pod_.magic == DXMT_SHARED_TEXTURE_MAGIC) {
+    if (shm_pod_.magic == DXN_SHARED_TEXTURE_MAGIC) {
       *pSharedHandle = reinterpret_cast<HANDLE>(&shm_pod_);
       return S_OK;
     }
@@ -579,7 +579,7 @@ ImportSharedTextureInternal(
 
 #ifndef _WIN32
 
-/* Native: hResource is a pointer to the exporter's shm_texture_pod, with
+/* Native: hResource is a pointer to the exporter's dxn_shared_texture, with
  * the fd field already valid in this process.  The fd is dup'd internally;
  * the caller keeps ownership of its copy. */
 HRESULT
@@ -595,23 +595,23 @@ ImportSharedTexture(MTLD3D11Device *pDevice, HANDLE hResource, REFIID riid, void
     return S_FALSE;
 
   const auto *pod = reinterpret_cast<const shm_texture_pod *>(hResource);
-  if (pod->magic != DXMT_SHARED_TEXTURE_MAGIC || pod->version != DXMT_SHARED_HANDLE_VERSION || pod->fd < 0) {
+  if (!dxn_shared_check(pod, DXN_SHARED_TEXTURE_MAGIC, sizeof(*pod)) || pod->fd < 0 || pod->plane_count != 1) {
     WARN("ImportSharedTexture: bad shm descriptor");
     return E_INVALIDARG;
   }
 
   D3D11_TEXTURE2D_DESC1 desc = {};
-  desc.Width = pod->width;
-  desc.Height = pod->height;
-  desc.MipLevels = pod->mip_levels;
-  desc.ArraySize = pod->array_size;
-  desc.Format = (DXGI_FORMAT)pod->dxgi_format;
-  desc.SampleDesc.Count = pod->sample_count;
+  desc.Width = pod->meta.width;
+  desc.Height = pod->meta.height;
+  desc.MipLevels = pod->meta.mip_levels;
+  desc.ArraySize = pod->meta.array_size;
+  desc.Format = (DXGI_FORMAT)pod->meta.dxgi_format;
+  desc.SampleDesc.Count = pod->meta.sample_count;
   desc.SampleDesc.Quality = 0;
   desc.Usage = D3D11_USAGE_DEFAULT;
-  desc.BindFlags = pod->bind_flags;
-  desc.CPUAccessFlags = pod->cpu_access;
-  desc.MiscFlags = pod->misc_flags;
+  desc.BindFlags = pod->meta.bind_flags;
+  desc.CPUAccessFlags = pod->meta.cpu_access_flags;
+  desc.MiscFlags = pod->meta.misc_flags;
   desc.TextureLayout = D3D11_TEXTURE_LAYOUT_UNDEFINED;
 
   WMTTextureInfo info;
@@ -625,7 +625,7 @@ ImportSharedTexture(MTLD3D11Device *pDevice, HANDLE hResource, REFIID riid, void
   Rc<TextureAllocation> allocation;
   shm_texture_pod own_pod;
   HRESULT hr = AllocateShmLinearTexture2D(
-      pDevice, finalDesc, info, pod->fd, pod->stride, pod->size, pod->offset, texture, allocation, own_pod
+      pDevice, finalDesc, info, pod->fd, pod->planes[0].pitch, pod->size, pod->planes[0].offset, texture, allocation, own_pod
   );
   if (FAILED(hr))
     return hr;

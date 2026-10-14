@@ -4,7 +4,7 @@
  * On Windows/Wine the MISC_SHARED path rides D3DKMT + mach-port shared
  * IOSurfaces; neither exists in a native macOS build.  Here a shared
  * texture is instead one linear plane of anonymous shared memory:
- * IDXGIResource::GetSharedHandle returns a pointer to the POD below, whose
+ * IDXGIResource::GetSharedHandle returns a pointer to a dxn_shared_texture, whose
  * fd travels to the peer process via SCM_RIGHTS.  A peer may mmap the fd
  * directly, so the texture's pixels MUST live in the shm at the recorded
  * stride — achieved with a linear MTLTexture over a
@@ -21,11 +21,9 @@
 
 namespace dxmt {
 
-/* The GetSharedHandle/OpenSharedResource wire format is the embedder
- * handle type; alias it so the internal code has one source of truth. */
-using shm_texture_pod = dxmt_shared_texture_handle;
-
-static_assert(sizeof(shm_texture_pod) == 72, "wire format");
+/* The GetSharedHandle/OpenSharedResource wire format is directx-native's
+ * shared-texture descriptor (its layout is asserted there). */
+using shm_texture_pod = dxn_shared_texture;
 
 /*
  * Build a linear shm-backed texture for `finalDesc` (already normalized by

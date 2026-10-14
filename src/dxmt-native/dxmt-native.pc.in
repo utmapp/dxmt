@@ -6,4 +6,4 @@ Name: dxmt-native
 Description: DXMT native D3D-on-Metal backend
 Version: @version@
 Libs: -L${libdir} -ldxmt-native
-Cflags: -I${includedir}/dxmt-native
+Cflags: -I${includedir}/dxmt-native -I${includedir}

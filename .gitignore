@@ -17,3 +17,6 @@ ref.sh
 *.test
 releases
 prefixes
+# directx-native checkout (meson wrap-git)
+/subprojects/directx-native
+/subprojects/.wraplock

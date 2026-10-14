@@ -11,71 +11,11 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#if __has_include(<sys/posix_shm.h>)
-#include <sys/posix_shm.h>
-#else
-/* Only macOS exposes the header; the kernel limit is the same everywhere. */
-#define PSHMNAMLEN 31
-#endif
 #include <unistd.h>
 
-/* An app group prefix must leave room for "/" and one nonce digit within
- * PSHMNAMLEN. */
-#define APP_SANDBOX_GROUP_ID_MAX (PSHMNAMLEN - 2)
+#include <directx-native/dxn_shm.h>
 
 namespace dxmt {
-
-static uint64_t
-page_align(uint64_t n) {
-  const uint64_t page = (uint64_t)getpagesize();
-  return (n + page - 1) & ~(page - 1);
-}
-
-/* Anonymous shm: exclusively-created then immediately unlinked, so the fd is
- * the only name. */
-static int
-anon_shm_file(uint64_t size) {
-  /* Under App Sandbox a shm name must live in the app group container, i.e. be
-   * prefixed with the group identifier instead of '/'; anything else is
-   * denied.  The prefix leaves no room for the tag or the pid, so a sandboxed
-   * name is just as much of the nonce as still fits -- eight hex digits while
-   * the prefix is at most 22 chars, down to one at the limit. */
-  const char *group = getenv("APP_SANDBOX_GROUP_ID");
-  if (group && !group[0])
-    group = nullptr;
-  if (group && strlen(group) > APP_SANDBOX_GROUP_ID_MAX) {
-    ERR("shm texture: APP_SANDBOX_GROUP_ID is ", strlen(group), " chars, at most ", APP_SANDBOX_GROUP_ID_MAX, " fit");
-    errno = EINVAL;
-    return -1;
-  }
-  const size_t nonce_room = group ? PSHMNAMLEN - strlen(group) - 1 : 8;
-  const unsigned nonce_digits = nonce_room < 8 ? (unsigned)nonce_room : 8;
-
-  for (int attempt = 0; attempt < 64; attempt++) {
-    /* macOS PSHMNAMLEN caps shm names at 31 chars. */
-    char name[PSHMNAMLEN + 1];
-    if (group)
-      snprintf(name, sizeof(name), "%s/%0*x", group, (int)nonce_digits, arc4random() >> (32 - 4 * nonce_digits));
-    else
-      snprintf(name, sizeof(name), "/dxmt-%x-%08x", getpid(), arc4random());
-    int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
-    if (fd < 0) {
-      if (errno == EEXIST)
-        continue;
-      return -1;
-    }
-    shm_unlink(name);
-    if (ftruncate(fd, (off_t)size) != 0) {
-      close(fd);
-      return -1;
-    }
-    int fdflags = fcntl(fd, F_GETFD);
-    if (fdflags >= 0)
-      fcntl(fd, F_SETFD, fdflags | FD_CLOEXEC);
-    return fd;
-  }
-  return -1;
-}
 
 HRESULT
 AllocateShmLinearTexture2D(
@@ -129,15 +69,15 @@ AllocateShmLinearTexture2D(
    * shared heap); mmap needs a page-aligned file offset, so map from the page
    * floor and place the texture at the delta inside the buffer. */
   const uint64_t offset = import_fd >= 0 ? import_offset : 0;
-  const uint64_t map_floor = offset & ~(page_align(1) - 1);
+  const uint64_t map_floor = offset & ~(dxn_shm_page_align(1) - 1);
   const uint64_t delta = offset - map_floor;
   if (delta > UINT32_MAX || logical_size > UINT64_MAX - delta) {
     ERR("shm texture: import offset out of range");
     return E_INVALIDARG;
   }
-  const uint64_t mapped_size = page_align(delta + logical_size);
+  const uint64_t mapped_size = dxn_shm_page_align(delta + logical_size);
 
-  int fd = import_fd >= 0 ? import_fd : anon_shm_file(mapped_size);
+  int fd = import_fd >= 0 ? import_fd : dxn_shm_create(mapped_size);
   if (fd < 0) {
     ERR("shm texture: shm_open failed: ", errno);
     return E_FAIL;
@@ -202,27 +142,31 @@ AllocateShmLinearTexture2D(
 
   /* The POD owns a fresh fd in both directions so an opened texture can be
    * re-exported and outlive the descriptor it was opened from. */
-  int pod_fd = import_fd >= 0 ? dup(fd) : fd;
+  int pod_fd = import_fd >= 0 ? fcntl(fd, F_DUPFD_CLOEXEC, 0) : fd;
   if (pod_fd < 0) {
     ERR("shm texture: dup failed: ", errno);
     return E_FAIL;
   }
 
-  out_pod.magic = DXMT_SHARED_TEXTURE_MAGIC;
-  out_pod.version = DXMT_SHARED_HANDLE_VERSION;
+  out_pod = {};
+  DXN_SHARED_INIT(&out_pod, DXN_SHARED_TEXTURE_MAGIC);
   out_pod.fd = pod_fd;
-  out_pod.width = finalDesc.Width;
-  out_pod.height = finalDesc.Height;
-  out_pod.dxgi_format = finalDesc.Format;
-  out_pod.mip_levels = finalDesc.MipLevels;
-  out_pod.array_size = finalDesc.ArraySize;
-  out_pod.sample_count = finalDesc.SampleDesc.Count;
-  out_pod.bind_flags = finalDesc.BindFlags;
-  out_pod.misc_flags = finalDesc.MiscFlags;
-  out_pod.cpu_access = finalDesc.CPUAccessFlags;
-  out_pod.stride = stride;
+  out_pod.meta.width = finalDesc.Width;
+  out_pod.meta.height = finalDesc.Height;
+  out_pod.meta.mip_levels = finalDesc.MipLevels;
+  out_pod.meta.array_size = finalDesc.ArraySize;
+  out_pod.meta.dxgi_format = finalDesc.Format;
+  out_pod.meta.sample_count = finalDesc.SampleDesc.Count;
+  out_pod.meta.sample_quality = finalDesc.SampleDesc.Quality;
+  out_pod.meta.usage = finalDesc.Usage;
+  out_pod.meta.bind_flags = finalDesc.BindFlags;
+  out_pod.meta.cpu_access_flags = finalDesc.CPUAccessFlags;
+  out_pod.meta.misc_flags = finalDesc.MiscFlags;
+  out_pod.meta.texture_layout = finalDesc.TextureLayout;
+  out_pod.plane_count = 1;
+  out_pod.planes[0].offset = offset;
+  out_pod.planes[0].pitch = stride;
   out_pod.size = logical_size;
-  out_pod.offset = offset;
 
   out_texture = std::move(texture);
   out_allocation = std::move(allocation);

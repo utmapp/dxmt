@@ -254,6 +254,12 @@ if dxmt_crossbuild
 endif
 
 subdir('libs')
+if not dxmt_crossbuild
+  directx_native_dep = dependency('directx-native',
+    fallback        : [ 'directx-native', 'directx_native_dep' ],
+    default_options : [ 'install_headers=true', 'tests=false' ])
+endif
+
 subdir('src')
 
 if get_option('enable_tests')

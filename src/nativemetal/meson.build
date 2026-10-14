@@ -2,7 +2,6 @@ winemetal_src = [
   '../winemetal/winemetal_thunks.c',
   '../winemetal/unix/winemetal_unix.c',
   '../winemetal/unix/cache.c',
-  '../winemetal/unix/dxmt_native_event.c',
 ]
 winemetal_link_depends = []
 
@@ -25,7 +24,7 @@ if not apple_platform.get('simulator', false)
 endif
 
 winemetal_lib = static_library('winemetal', winemetal_src,
-  dependencies        : [ airconv_dep_darwin ],
+  dependencies        : [ airconv_dep_darwin, directx_native_dep ],
   include_directories : [ dxmt_include_path, include_directories('.') ],
   c_args              : ['-ObjC'],
 )
@@ -33,6 +32,7 @@ winemetal_lib = static_library('winemetal', winemetal_src,
 # The frameworks ride along to whatever links this, i.e. the single dylib.
 winemetal_dep = declare_dependency(
   link_with           : [ winemetal_lib ],
+  dependencies        : [ directx_native_dep ],
   include_directories : [ include_directories('../winemetal') ],
   link_args           : winemetal_ld_args,
 )
