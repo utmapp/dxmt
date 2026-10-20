@@ -666,7 +666,7 @@ public:
             D3D11_FORMAT_SUPPORT2_SHAREABLE;
       }
 
-#ifndef DXMT_NO_PRIVATE_API
+#ifndef DXMT_NO_LOGIC_OP
       if (any_bit_set(Capability & FormatCapability::Blend)) {
         /* UNCHECKED */
         info->OutFormatSupport2 |= D3D11_FORMAT_SUPPORT2_OUTPUT_MERGER_LOGIC_OP;

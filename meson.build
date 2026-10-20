@@ -233,9 +233,6 @@ else
   add_project_arguments('-DDXMT_NATIVE=1', language : ['c', 'cpp'])
   # App Store validation rejects any image that imports a private symbol
   add_project_arguments('-DDXMT_NO_PRIVATE_SYMBOLS=1', language : ['c', 'cpp'])
-  if apple_subsystem != 'macos'
-    add_project_arguments('-DDXMT_NO_PRIVATE_API=1', language : ['c', 'cpp'])
-  endif
 endif
 
 native_compiler_arch = cpu_family == 'aarch64' ? 'arm64' : 'x86_64'

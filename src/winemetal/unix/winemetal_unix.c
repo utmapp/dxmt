@@ -563,7 +563,7 @@ _MTLCommandEncoder_endEncoding(void *obj) {
   return STATUS_SUCCESS;
 }
 
-#ifndef DXMT_NO_PRIVATE_API
+#ifndef DXMT_NO_LOGIC_OP
 
 typedef NS_ENUM(NSUInteger, MTLLogicOperation) {
   MTLLogicOperationClear,
@@ -629,7 +629,7 @@ _MTLDevice_newRenderPipelineState(void *obj) {
       descriptor.vertexBuffers[i].mutability = MTLMutabilityImmutable;
   }
 
-#ifndef DXMT_NO_PRIVATE_API
+#ifndef DXMT_NO_LOGIC_OP
   [descriptor setLogicOperationEnabled:info->logic_operation_enabled];
   [descriptor setLogicOperation:(MTLLogicOperation)info->logic_operation];
 #endif
@@ -695,7 +695,7 @@ _MTLDevice_newMeshRenderPipelineState(void *obj) {
       descriptor.objectBuffers[i].mutability = MTLMutabilityImmutable;
   }
 
-#ifndef DXMT_NO_PRIVATE_API
+#ifndef DXMT_NO_LOGIC_OP
   [descriptor setLogicOperationEnabled:info->logic_operation_enabled];
   [descriptor setLogicOperation:(MTLLogicOperation)info->logic_operation];
 #endif

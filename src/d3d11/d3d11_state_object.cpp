@@ -344,7 +344,7 @@ public:
     (b) when logic blending all RenderTargets bound must have a UINT format (undefined rendering otherwise).
     */
     if (!desc_.IndependentBlendEnable && desc_.RenderTarget[0].LogicOpEnable) {
-#ifdef DXMT_NO_PRIVATE_API
+#ifdef DXMT_NO_LOGIC_OP
       // Unreachable in practice: OutputMergerLogicOp is reported unsupported,
       // so the runtime rejects such blend states before they get here.
       ERR("OutputMerger LogicOp is not supported");
