@@ -228,7 +228,7 @@ _CacheWriter_set(void *obj) {
   return 0;
 }
 
-#ifndef DXMT_NO_PRIVATE_API
+#if !defined(DXMT_NO_PRIVATE_API) && !defined(DXMT_NO_PRIVATE_SYMBOLS)
 
 extern void MTLSetShaderCachePath(NSString* path);
 extern NSString* MTLGetShaderCachePath();

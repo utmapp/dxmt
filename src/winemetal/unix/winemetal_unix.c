@@ -2871,15 +2871,17 @@ _MTLDevice_newSharedTexture(void *obj) {
 }
 
 /* The bootstrap server is macOS-only: <bootstrap.h> is in no other SDK, and the
- * name namespace is unreachable from a sandboxed app anyway. */
-#if TARGET_OS_OSX
+ * name namespace is unreachable from a sandboxed app anyway.  Registering a
+ * name takes a private symbol, so native builds can only look names up (they
+ * share through directx-native and never register). */
+#if TARGET_OS_OSX && !defined(DXMT_NO_PRIVATE_SYMBOLS)
 /* Private API to register a mach port with the bootstrap server */
 extern kern_return_t bootstrap_register2(mach_port_t bp, name_t service_name, mach_port_t sp, int flags);
 #endif
 
 static NTSTATUS
 _WMTBootstrapRegister(void *obj) {
-#if !TARGET_OS_OSX
+#if !TARGET_OS_OSX || defined(DXMT_NO_PRIVATE_SYMBOLS)
   (void)obj;
   return STATUS_UNSUCCESSFUL;
 #else

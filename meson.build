@@ -231,9 +231,8 @@ else
   # single image that would be several definitions of one symbol, so the
   # modules drop theirs and dxmt-native defines the only one.
   add_project_arguments('-DDXMT_NATIVE=1', language : ['c', 'cpp'])
-  # Only macOS tolerates Metal SPI (the shader-cache path, logic ops).  The
-  # App Store rejects any image importing it, so the other platforms build
-  # without.
+  # App Store validation rejects any image that imports a private symbol
+  add_project_arguments('-DDXMT_NO_PRIVATE_SYMBOLS=1', language : ['c', 'cpp'])
   if apple_subsystem != 'macos'
     add_project_arguments('-DDXMT_NO_PRIVATE_API=1', language : ['c', 'cpp'])
   endif
