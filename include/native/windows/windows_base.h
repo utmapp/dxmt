@@ -205,9 +205,16 @@ typedef struct RGNDATA {
   char          Buffer[1];
 } RGNDATA,*PRGNDATA,*NPRGNDATA,*LPRGNDATA;
 
-// Ignore these.
-#define STDMETHODCALLTYPE
-#define __stdcall
+// Neptune (virglrenderer) calls every D3D entry point and COM method with
+// the Microsoft x64 convention on x86_64 macOS, as it does for D3DMetal; on
+// arm64 the two conventions are the same.
+#if defined(__x86_64__)
+#define DXMT_NATIVE_MS_ABI __attribute__((ms_abi))
+#else
+#define DXMT_NATIVE_MS_ABI
+#endif
+#define STDMETHODCALLTYPE DXMT_NATIVE_MS_ABI
+#define __stdcall DXMT_NATIVE_MS_ABI
 
 #define CONST const
 #define CONST_VTBL const
@@ -288,7 +295,7 @@ typedef struct RGNDATA {
 #define DXGI_ERROR_NAME_ALREADY_EXISTS           ((HRESULT)0x887A002C)
 #define DXGI_ERROR_SDK_COMPONENT_MISSING         ((HRESULT)0x887A002D)
 
-#define WINAPI
+#define WINAPI DXMT_NATIVE_MS_ABI
 #define WINUSERAPI
 
 #define RGB(r,g,b)          ((COLORREF)(((BYTE)(r)|((WORD)((BYTE)(g))<<8))|(((DWORD)(BYTE)(b))<<16)))
@@ -297,8 +304,8 @@ typedef struct RGNDATA {
     ((HRESULT) (((unsigned long)(sev)<<31) | ((unsigned long)(fac)<<16) | ((unsigned long)(code))) )
 
 #ifdef __cplusplus
-#define STDMETHOD(name) virtual HRESULT name
-#define STDMETHOD_(type, name) virtual type name
+#define STDMETHOD(name) virtual HRESULT STDMETHODCALLTYPE name
+#define STDMETHOD_(type, name) virtual type STDMETHODCALLTYPE name
 #else
 #define STDMETHOD(name) HRESULT (STDMETHODCALLTYPE *name)
 #define STDMETHOD_(type, name) type (STDMETHODCALLTYPE *name)
