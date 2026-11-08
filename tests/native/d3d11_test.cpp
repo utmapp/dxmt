@@ -369,7 +369,8 @@ static std::vector<uint8_t>
 draw_and_read(
     Ctx &c, UINT W, UINT H, const Vertex *verts, UINT nverts, const void *vs, size_t vs_len, const void *ps,
     size_t ps_len, DXGI_FORMAT rt_format = DXGI_FORMAT_R8G8B8A8_UNORM,
-    void (*extra)(Ctx &, ID3D11DeviceContext *) = nullptr, ID3D11DeviceContext *record = nullptr, UINT instances = 0
+    void (*extra)(Ctx &, ID3D11DeviceContext *) = nullptr, ID3D11DeviceContext *record = nullptr, UINT instances = 0,
+    UINT vb_slot = 0
 ) {
   ID3D11DeviceContext *ctx = record ? record : c.ctx.p;
 
@@ -405,7 +406,11 @@ draw_and_read(
     return {};
   if (FAILED(c.device->CreatePixelShader(ps, ps_len, nullptr, &pshader)))
     return {};
-  if (FAILED(c.device->CreateInputLayout(kLayout, 3, vs, vs_len, &layout)))
+  D3D11_INPUT_ELEMENT_DESC elems[3];
+  memcpy(elems, kLayout, sizeof(elems));
+  for (auto &e : elems)
+    e.InputSlot = vb_slot;
+  if (FAILED(c.device->CreateInputLayout(elems, 3, vs, vs_len, &layout)))
     return {};
 
   float clear[4] = {0, 0, 0, 1};
@@ -414,7 +419,7 @@ draw_and_read(
   D3D11_VIEWPORT vp = {0, 0, (float)W, (float)H, 0, 1};
   ctx->RSSetViewports(1, &vp);
   UINT stride = sizeof(Vertex), offset = 0;
-  ctx->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
+  ctx->IASetVertexBuffers(vb_slot, 1, &vb, &stride, &offset);
   ctx->IASetInputLayout(layout);
   ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   ctx->VSSetShader(vshader, nullptr, 0);
@@ -569,6 +574,43 @@ test_draw_basic(Ctx &c) {
   CHECK(T, px_eq(img, W, 16, 64, 255, 128, 64, 255, 1), log_px(img, W, 16, 64, "left"));
   CHECK(T, px_eq(img, W, 100, 64, 0, 0, 0, 255, 0), log_px(img, W, 100, 64, "right"));
   emit("[CRC] %s.rt = 0x%08x", T, crc32_of(img.data(), img.size()));
+}
+
+/* D3D11 has 32 input slots (D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT); the
+ * same quad drawn from the last one must match slot 0, and the binding must
+ * read back through IAGetVertexBuffers and go away with ClearState. */
+static Com<ID3D11Buffer> g_hi_vb;
+static UINT g_hi_stride, g_hi_offset;
+
+static void
+grab_last_vertex_slot(Ctx &, ID3D11DeviceContext *ctx) {
+  ctx->IAGetVertexBuffers(31, 1, &g_hi_vb, &g_hi_stride, &g_hi_offset);
+}
+
+static void
+test_draw_last_vertex_slot(Ctx &c) {
+  const char *T = "draw_last_vertex_slot";
+  const UINT W = 128, H = 128;
+  auto ref =
+      draw_and_read(c, W, H, kQuadLeft, 6, dxbc_vs_pass, sizeof(dxbc_vs_pass), dxbc_ps_color, sizeof(dxbc_ps_color));
+  auto img = draw_and_read(
+      c, W, H, kQuadLeft, 6, dxbc_vs_pass, sizeof(dxbc_vs_pass), dxbc_ps_color, sizeof(dxbc_ps_color),
+      DXGI_FORMAT_R8G8B8A8_UNORM, grab_last_vertex_slot, nullptr, 0, 31
+  );
+  CHECK(T, img.size() == W * H * 4, return);
+  CHECK(T, img == ref);
+  CHECK(T, g_hi_vb && g_hi_stride == sizeof(Vertex) && g_hi_offset == 0);
+  if (g_hi_vb) {
+    g_hi_vb->Release();
+    g_hi_vb.p = nullptr;
+  }
+  /* draw_and_read ends with ClearState */
+  ID3D11Buffer *after = nullptr;
+  UINT stride = 1, offset = 1;
+  c.ctx->IAGetVertexBuffers(31, 1, &after, &stride, &offset);
+  CHECK(T, after == nullptr && stride == 0 && offset == 0);
+  if (after)
+    after->Release();
 }
 
 /* ps_compat carries the DXBC patterns whose AIR translation used to emit
@@ -1533,6 +1575,7 @@ main(int argc, char **argv) {
   test_draw_basic(c);
   test_compat_shapes(c);
   test_draw_deferred(c);
+  test_draw_last_vertex_slot(c);
   test_draw_cbuffer(c);
   test_draw_textured(c);
   test_draw_instanced(c);
